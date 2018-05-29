@@ -14,21 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import configparser
 import json
 import logging
 import optparse
 import sys
 import threading
 import time
-
+import redis
 import boto
 import boto.ec2
 import gevent
 import gevent.queue
-import zmq
-from daemonize import Daemonize
 
+from daemonize import Daemonize
 from tortuga.exceptions.nodeAlreadyExists import NodeAlreadyExists
 from tortuga.exceptions.nodeNotFound import NodeNotFound
 from tortuga.hardwareprofile.hardwareProfileApi import HardwareProfileApi
@@ -41,23 +39,24 @@ PIDFILE = '/var/log/awsspotd.pid'
 # Poll for spot instance status every 60s
 SPOT_INSTANCE_POLLING_INTERVAL = 60
 
-spot_cache = threading.RLock()
+SPOT_CACHE = threading.RLock()
 
-spot_instance_request_cache_filename = \
-    '/opt/tortuga/var/spot-instances.conf'
+REDIS_CLIENT = redis.StrictRedis(
+    host='',
+    port=6379,
+    db=0
+)
 
 
 def refresh_spot_instance_request_cache():
-    cfg = configparser.ConfigParser()
-
-    cfg.read(spot_instance_request_cache_filename)
-
-    return cfg
+    cfg = REDIS_CLIENT.get('spot-config')
+    if isinstance(cfg, dict):
+        return cfg
+    return {}
 
 
 def write_spot_instance_request_cache(cfg):
-    with open(spot_instance_request_cache_filename, 'w') as fp:
-        cfg.write(fp)
+    return REDIS_CLIENT.set('spot-config', cfg)
 
 
 def update_spot_instance_request_cache(sir_id, metadata=None):
@@ -66,11 +65,8 @@ def update_spot_instance_request_cache(sir_id, metadata=None):
 
     cfg = refresh_spot_instance_request_cache()
 
-    if not cfg.has_section(sir_id):
-        cfg.add_section(sir_id)
-
-    for key, value in list(metadata.items()):
-        cfg.set(sir_id, key, value)
+    if sir_id not in cfg:
+        cfg[sir_id] = metadata
 
     write_spot_instance_request_cache(cfg)
 
@@ -78,47 +74,41 @@ def update_spot_instance_request_cache(sir_id, metadata=None):
 def listener(logger):
     logger.info('Starting listener thread')
 
-    context = zmq.Context()
-    socket = context.socket(zmq.REP)
-    socket.bind("tcp://*:5555")
+    pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-d')
 
     while True:
-        message = socket.recv()
+        request = pubsub.get_message()
 
-        request = json.loads(message)
-
-        if 'action' not in request:
-            socket.send(json.dumps({'error': 'malformed request'}))
-
+        if 'action' not in request['data']:
+            pubsub.publish(json.dumps({'error': 'malformed request'}))
             continue
 
-        with spot_cache:
+        with SPOT_CACHE:
             cfg = refresh_spot_instance_request_cache()
 
-            if not cfg.has_section(request['spot_instance_request_id']):
-                cfg.add_section(request['spot_instance_request_id'])
+            if request['data']['spot_instance_request_id'] not in cfg:
+                cfg[request['data']['spot_instance_request_id']] = {}
 
                 logger.info(
                     'Updating spot instance [{0}]'.format(
-                        request['spot_instance_request_id']))
+                        request['data']['spot_instance_request_id']))
 
-                if 'softwareprofile' in request:
-                    cfg.set(request['spot_instance_request_id'],
-                            'softwareprofile', request['softwareprofile'])
+                if 'softwareprofile' in request['data']:
+                    cfg[request['data']['spot_instance_request_id']]['softwareprofile'] = \
+                        request['data']['softwareprofile']
 
-                if 'hardwareprofile' in request:
-                    cfg.set(request['spot_instance_request_id'],
-                            'hardwareprofile', request['hardwareprofile'])
+                if 'hardwareprofile' in request['data']:
+                    cfg[request['data']['spot_instance_request_id']]['hardwareprofile'] = \
+                        request['data']['hardwareprofile']
 
-                if 'resource_adapter_configuration' in request:
-                    cfg.set(request['spot_instance_request_id'],
-                            'resource_adapter_configuration',
-                            request['resource_adapter_configuration'])
+                if 'resource_adapter_configuration' in request['data']:
+                    cfg[request['data']['spot_instance_request_id']]['resource_adapter_configuration'] = \
+                        request['data']['resource_adapter_configuration']
 
                 write_spot_instance_request_cache(cfg)
 
-        #  Send reply back to client
-        socket.send(b"success")
+        # Send reply back to client
+        pubsub.publish(b'success')
 
 
 class AWSSpotdAppClass(object):
@@ -182,7 +172,7 @@ class AWSSpotdAppClass(object):
                 # Clean up
                 self.logger.info('Cleaning up...')
 
-                with spot_cache:
+                with SPOT_CACHE:
                     cfg = refresh_spot_instance_request_cache()
 
                     for spot_instance_request in spot_instance_requests:
@@ -197,13 +187,11 @@ class AWSSpotdAppClass(object):
                             continue
 
                         # Delete spot instance request cache entry
-
                         self.logger.info(
                             'Removing spot instance request [{0}]'.format(
                                 spot_instance_request['sir_id']))
 
-                        cfg.remove_section(
-                            spot_instance_request['sir_id'])
+                        cfg.pop(spot_instance_request['sir_id'], None)
 
                     # Rewrite spot instance request cache
                     write_spot_instance_request_cache(cfg)
@@ -218,24 +206,24 @@ class AWSSpotdAppClass(object):
     def __parse_spot_instance_request_cache(self, cfg):
         spot_instance_requests = []
 
-        for sir_id in cfg.sections():
+        for sir_id in cfg.keys():
             spot_instance_request = {
                 'sir_id': sir_id,
             }
 
-            if cfg.has_option(sir_id, 'softwareprofile'):
+            if 'softwareprofile' in cfg[sir_id]:
                 spot_instance_request['softwareprofile'] = \
-                    cfg.get(sir_id, 'softwareprofile')
+                    cfg[sir_id]['softwareprofile']
 
-            if cfg.has_option(sir_id, 'hardwareprofile'):
+            if 'hardwareprofile' in cfg[sir_id]:
                 spot_instance_request['hardwareprofile'] = \
-                    cfg.get(sir_id, 'hardwareprofile')
+                    cfg[sir_id]['hardwareprofile']
 
-            if cfg.has_option(sir_id, 'resource_adapter_configuration'):
+            if 'resource_adapter_configuration' in cfg[sir_id]:
                 spot_instance_request['resource_adapter_configuration'] = \
-                    cfg.get(sir_id, 'resource_adapter_configuration')
+                    cfg[sir_id]['resource_adapter_configuration']
 
-            spot_instance_requests.append(spot_instance_request)
+        spot_instance_requests.append(spot_instance_request)
 
         return spot_instance_requests
 
@@ -284,11 +272,10 @@ class AWSSpotdAppClass(object):
             if result[0].status.code == 'fulfilled':
                 cfg = refresh_spot_instance_request_cache()
 
-                if cfg.has_section(sir_id) and \
-                        cfg.has_option(sir_id, 'status') and \
-                        cfg.get(sir_id, 'status') == 'fulfilled':
-                    # sir has already been processed
-                    return
+                if cfg.get(sir_id, None) and \
+                        cfg[sir_id].get('status', None) and \
+                        cfg[sir_id]['status'] == 'fulfilled':
+                    return  # Already processed.
 
                 self.__fulfilled_request_handler(
                     ec2_conn, sir_id, result[0].instance_id,
@@ -396,19 +383,16 @@ class AWSSpotdAppClass(object):
             return
 
         # Determine node from spot instance request id
-        adapter_cfg = configparser.ConfigParser()
-        adapter_cfg.read('/opt/tortuga/var/aws-instance.conf')
+        nodes = REDIS_CLIENT.get('tortuga-aws-instance')
 
         create_node = False
 
-        for node_name in adapter_cfg.sections():
-            if adapter_cfg.has_option(
-                    node_name, 'spot_instance_request') and \
-                    adapter_cfg.get(node_name,
-                                    'spot_instance_request') == sir_id:
+        for node_name in nodes.keys():
+            if nodes[node_name].get('spot_instance_request', None) and \
+                    nodes[node_name]['spot_instance_request'] == sir_id:
                 break
-        else:
-            create_node = True
+            else:
+                create_node = True
 
             node_name = instance.private_dns_name \
                 if hwp.getNameFormat() == '*' else None
@@ -486,18 +470,18 @@ class AWSSpotdAppClass(object):
             sir_id, metadata=dict(node=node_name, status='fulfilled'))
 
     def delete_node(self, sir_id):
-        with spot_cache:
+        with SPOT_CACHE:
             cfg = refresh_spot_instance_request_cache()
 
-            if not cfg.has_section(sir_id) or \
-                    not cfg.has_option(sir_id, 'node'):
+            if not cfg.get(sir_id, None) or \
+                    not cfg[sir_id].get('node', None):
                 self.logger.warning(
                     'Spot instance [{0}] does not have an'
                     ' associated node'.format(sir_id))
 
                 return
 
-            spot_instance_node_mapping = cfg.get(sir_id, 'node')
+            spot_instance_node_mapping = cfg[sir_id].get('node', None)
 
             if spot_instance_node_mapping:
                 self.logger.info(
