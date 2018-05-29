@@ -49,14 +49,14 @@ REDIS_CLIENT = redis.StrictRedis(
 
 
 def refresh_spot_instance_request_cache():
-    cfg = REDIS_CLIENT.get('spot-config')
+    cfg = json.loads(REDIS_CLIENT.get('spot-config'))
     if isinstance(cfg, dict):
         return cfg
     return {}
 
 
 def write_spot_instance_request_cache(cfg):
-    return REDIS_CLIENT.set('spot-config', cfg)
+    return REDIS_CLIENT.set('spot-config', json.dumps(cfg))
 
 
 def update_spot_instance_request_cache(sir_id, metadata=None):
@@ -383,7 +383,7 @@ class AWSSpotdAppClass(object):
             return
 
         # Determine node from spot instance request id
-        nodes = REDIS_CLIENT.get('tortuga-aws-instance')
+        nodes = json.loads(REDIS_CLIENT.get('tortuga-aws-instance'))
 
         create_node = False
 
