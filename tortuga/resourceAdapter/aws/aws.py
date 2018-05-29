@@ -1012,6 +1012,39 @@ class Aws(ResourceAdapter):
     def cancel_spot_instance_requests(self):
         """TODO"""
 
+    def request_spot_fleet_instances(self, addNodesRequest, dbSession,
+                                dbHardwareProfile, dbSoftwareProfile):
+        """
+        Request spot fleet instances.
+
+        :returns: None
+        """
+        pass
+
+    def _async_request_spot_fleet_instances():
+        """
+        Wrapper for greenlets.
+
+        :returns: None
+        """
+        client = boto3.client('ec2')
+        response = client.request_spot_fleet(
+            DryRun=False,
+            SpotFleetRequestConfig={
+                'SpotPrice': '1.00',
+                'IamFleetRole': 'arn:aws:iam::610974382091:role/aws-service-role/spotfleet.amazonaws.com/AWSServiceRoleForEC2SpotFleet',
+                'TargetCapacity': 12,
+                'LaunchSpecifications': [{
+                    'ImageId': 'ami-951201f1',
+                    'InstanceType': 'm4.xlarge',
+                    'WeightedCapacity': 1,
+                    'Placement': {
+                        'AvailabilityZone': 'eu-west-2a, eu-west-2b'
+                    }
+                }]
+            }
+        )
+
     def validate_start_arguments(self, addNodesRequest, dbHardwareProfile,
                                  dbSoftwareProfile): \
             # pylint: disable=unused-argument
