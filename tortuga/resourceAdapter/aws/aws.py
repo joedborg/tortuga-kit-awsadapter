@@ -61,6 +61,13 @@ from .helpers import _get_encoded_list, ec2_get_root_block_devices
 from .launchRequest import LaunchRequest, init_node_request_queue
 
 
+REDIS_CLIENT = redis.StrictRedis(
+    host='localhost',
+    port=6379,
+    db=0
+)
+
+
 class Aws(ResourceAdapter):
     """
     AWS resource adapter
@@ -966,15 +973,16 @@ class Aws(ResourceAdapter):
 
         return nodes
 
-    def __get_request_spot_instance_args(self, addNodesRequest: dict,
-                                         configDict: dict,
-                                         ami: str,
-                                         security_group_ids: List[str],
-                                         node: Optional[Union[Node, None]] = None):
+    def __get_request_spot_instance_args(
+            self, addNodesRequest: dict, configDict: dict, ami: str,
+            security_group_ids: List[str],
+            node: Optional[Union[Node, None]] = None):
         """
-        Create dict of args for boto request_spot_instances() API
-        """
+        Create dict of args for boto
+        request_spot_instances() API.
 
+        :returns: None
+        """
         user_data = self.__get_user_data(configDict, node=node)
 
         # Get common AWS launch args
@@ -991,41 +999,30 @@ class Aws(ResourceAdapter):
 
         return args
 
-    def __post_add_spot_instance_request(self, resv,
-                                         dbHardwareProfile: HardwareProfile,
-                                         dbSoftwareProfile: SoftwareProfile,
-                                         cfgname: Optional[str] = None) -> NoReturn:
-        # Send message to awsspotd (using zeromq)
-        context = zmq.Context()
+    def __post_add_spot_instance_request(
+            self, resv, dbHardwareProfile: HardwareProfile,
+            dbSoftwareProfile: SoftwareProfile,
+            cfgname: Optional[str] = None) -> NoReturn:
+        """
+        Send message to awsspotd.
 
-        try:
-            socket = context.socket(zmq.REQ)
-            socket.connect("tcp://localhost:5555")
+        :returns: None
+        """
+        pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-d')
 
-            try:
-                for r in resv:
-                    request = {
-                        'action': 'add',
-                        'spot_instance_request_id': r.id,
-                        'softwareprofile': dbSoftwareProfile.name,
-                        'hardwareprofile': dbHardwareProfile.name,
-                    }
+        for r in resv:
+            request = {
+                'action': 'add',
+                'spot_instance_request_id': r.id,
+                'softwareprofile': dbSoftwareProfile.name,
+                'hardwareprofile': dbHardwareProfile.name,
+            }
 
-                    if cfgname:
-                        request['resource_adapter_configuration'] = \
-                            cfgname
+            if cfgname:
+                request['resource_adapter_configuration'] = \
+                    cfgname
 
-                    socket.send(json.dumps(request))
-
-                    message = socket.recv()
-
-                    self.getLogger().debug(
-                        'request_spot_instances():'
-                        ' response=[{0}]'.format(message))
-            finally:
-                socket.close()
-        finally:
-            context.term()
+            pubsub.publish(json.dumps(request))
 
     def cancel_spot_instance_requests(self):
         """TODO"""
@@ -1037,21 +1034,13 @@ class Aws(ResourceAdapter):
 
         :returns: None
         """
-        pass
-
-    def _async_request_spot_fleet_instances():
-        """
-        Wrapper for greenlets.
-
-        :returns: None
-        """
         client = boto3.client('ec2')
         response = client.request_spot_fleet(
             DryRun=False,
             SpotFleetRequestConfig={
-                'SpotPrice': '1.00',
-                'IamFleetRole': 'arn:aws:iam::610974382091:role/aws-service-role/spotfleet.amazonaws.com/AWSServiceRoleForEC2SpotFleet',
-                'TargetCapacity': 12,
+                'SpotPrice': addNodesRequest['spot_instance_request']['price'],
+                'IamFleetRole': addNodesRequest['spot_instance_request']['role'],
+                'TargetCapacity': addNodesRequest['count'],
                 'LaunchSpecifications': [{
                     'ImageId': 'ami-951201f1',
                     'InstanceType': 'm4.xlarge',
@@ -1061,6 +1050,22 @@ class Aws(ResourceAdapter):
                     }
                 }]
             }
+        )
+
+    def __post_add_spot_fleet_instance_request(
+            self, resv, dbHardwareProfile: HardwareProfile,
+            dbSoftwareProfile: SoftwareProfile,
+            cfgname: Optional[str] = None) -> NoReturn:
+        """
+        Notify awsspotd of nodes.
+
+        :returns: None
+        """
+        self.__post_add_spot_instance_request(
+            resv,
+            dbHardwareProfile,
+            dbSoftwareProfile,
+            cfgname
         )
 
     def validate_start_arguments(self, addNodesRequest: dict,

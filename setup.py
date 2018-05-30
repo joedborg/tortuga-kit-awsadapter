@@ -34,6 +34,7 @@ setup(
         'gevent',
         'awscli',
         'click',
+        'redis',
         'colorama',
         'daemonize',
     ],

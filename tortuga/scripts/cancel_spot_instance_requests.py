@@ -18,13 +18,21 @@ import configparser
 import logging
 import os.path
 import sys
-
+import json
+import redis
 import boto3
 
 from tortuga.cli.tortugaCli import TortugaCli
 from tortuga.config.configManager import ConfigManager
 from tortuga.node.nodeApi import NodeApi
 from tortuga.resourceAdapter.aws import Aws
+
+
+REDIS_CLIENT = redis.StrictRedis(
+    host='localhost',
+    port=6379,
+    db=0
+)
 
 
 class CancelSpotInstanceRequestsCLI(TortugaCli):
@@ -136,8 +144,7 @@ class CancelSpotInstanceRequestsCLI(TortugaCli):
     def __cancel_spot_instances(self, result):
         sir_map = self.__get_spot_instance_request_map(result)
 
-        aws_instance_cache = configparser.ConfigParser()
-        aws_instance_cache.read('/opt/tortuga/var/aws-instance.conf')
+        aws_instance_cache = REDIS_CLIENT.get('tortuga-aws-instance')
 
         # Iterate on map cancelling requests in each region
         for region_name, sir_ids in sir_map.iteritems():
@@ -179,15 +186,15 @@ class CancelSpotInstanceRequestsCLI(TortugaCli):
 
                         self.nodeApi.deleteNode(node_name)
 
-    def __get_associated_node(self, aws_instance_cache, sir_id): \
-            # pylint: disable=no-self-use
+    @staticmethod
+    def __get_associated_node(aws_instance_cache, sir_id):
         node_name = None
 
-        for node_name in aws_instance_cache.sections():
-            if aws_instance_cache.has_option(
-                    node_name, 'spot_instance_request') and \
-                aws_instance_cache.get(
-                    node_name, 'spot_instance_request') == sir_id:
+        for node_name in aws_instance_cache.keys():
+            if aws_instance_cache[node_name].get(
+                    'spot_instance_request', None) and \
+                    aws_instance_cache[node_name]['spot_instance_request'] == \
+                    sir_id:
                 break
         else:
             return None

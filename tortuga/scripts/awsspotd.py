@@ -42,7 +42,7 @@ SPOT_INSTANCE_POLLING_INTERVAL = 60
 SPOT_CACHE = threading.RLock()
 
 REDIS_CLIENT = redis.StrictRedis(
-    host='',
+    host='localhost',
     port=6379,
     db=0
 )
