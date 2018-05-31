@@ -298,6 +298,7 @@ class Aws(ResourceAdapter):
                     'dns_nameservers',
                     'dns_options',
                     'iam_instance_profile_name',
+                    'fleet_role'
                    ]:  # noqa
             config[key] = configDict[key] if key in configDict else None
 
@@ -700,7 +701,6 @@ class Aws(ResourceAdapter):
         Raises:
             InvalidArgument
         """
-
         self.getLogger().debug(
             'start(addNodeRequest=[%s], dbSession=[%s],'
             ' dbHardwareProfile=[%s], dbSoftwareProfile=[%s])' % (
@@ -1019,7 +1019,8 @@ class Aws(ResourceAdapter):
 
         :returns: None
         """
-        pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-d')
+        pubsub = REDIS_CLIENT.pubsub()
+        pubsub.subscribe('tortuga-aws-spot-d')
 
         for r in resv:
             request = {
@@ -1033,7 +1034,10 @@ class Aws(ResourceAdapter):
                 request['resource_adapter_configuration'] = \
                     cfgname
 
-            pubsub.publish(json.dumps(request))
+            REDIS_CLIENT.publish(
+                'tortuga-aws-spot-d',
+                json.dumps(request)
+            )
 
     def cancel_spot_instance_requests(self):
         """TODO"""
@@ -1045,33 +1049,32 @@ class Aws(ResourceAdapter):
 
         :returns: None
         """
+
         cfgname = addNodesRequest['resource_adapter_configuration'] \
             if 'resource_adapter_configuration' in addNodesRequest else \
             None
 
         configDict = self.getResourceAdapterConfig(cfgname)
 
-        conn = boto3.client('ec2')
+        conn = boto3.client('ec2', region_name=configDict['region'].name)
         response = conn.request_spot_fleet(
             DryRun=False,
             SpotFleetRequestConfig={
-                'SpotPrice': addNodesRequest['spot_fleet_request']['price'],
-                'IamFleetRole': addNodesRequest['spot_fleet_request']['role'],
-                'TargetCapacity': configDict['count'],
+                'SpotPrice': '{:0.2f}'.format(
+                    addNodesRequest['spot_fleet_request']['price']),
+                'IamFleetRole': configDict['fleet_role'],
+                'TargetCapacity': addNodesRequest['count'],
                 'LaunchSpecifications': [{
                     'ImageId': configDict['ami'],
                     'InstanceType': configDict['instancetype'],
-                    'WeightedCapacity': configDict['weighted_capacity'],
-                    'Placement': {
-                        'AvailabilityZone': configDict['region']
-                    }
+                    'WeightedCapacity': 1
                 }]
             }
         )
 
         self.__post_add_spot_fleet_instance_request(
             response['SpotFleetRequestId'],
-            configDict['count'],
+            addNodesRequest['count'],
             dbHardwareProfile,
             dbSoftwareProfile,
             cfgname
@@ -1080,7 +1083,7 @@ class Aws(ResourceAdapter):
         nodes = self.__create_nodes(
             dbHardwareProfile,
             dbSoftwareProfile,
-            count=configDict['count'],
+            count=addNodesRequest['count'],
             initial_state='Allocated'
         )
 
@@ -1098,7 +1101,8 @@ class Aws(ResourceAdapter):
 
         :returns: None
         """
-        pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-fleet-d')
+        pubsub = REDIS_CLIENT.pubsub()
+        pubsub.subscribe('tortuga-aws-spot-fleet-d')
 
         request = {
             'action': 'add',
@@ -1112,7 +1116,10 @@ class Aws(ResourceAdapter):
             request['resource_adapter_configuration'] = \
                 cfgname
 
-        pubsub.publish(json.dumps(request))
+        REDIS_CLIENT.publish(
+            'tortuga-aws-spot-fleet-d',
+            json.dumps(request)
+        )
 
     def validate_start_arguments(self, addNodesRequest: dict,
                                  dbHardwareProfile: HardwareProfile,
