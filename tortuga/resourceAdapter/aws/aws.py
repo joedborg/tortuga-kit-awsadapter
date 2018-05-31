@@ -28,7 +28,7 @@ from typing import List, NoReturn, Optional, Tuple, Union
 
 import gevent
 import gevent.queue
-import zmq
+import redis
 from sqlalchemy.orm.session import Session
 
 import boto3
@@ -1076,6 +1076,15 @@ class Aws(ResourceAdapter):
             dbSoftwareProfile,
             cfgname
         )
+
+        nodes = self.__create_nodes(
+            dbHardwareProfile,
+            dbSoftwareProfile,
+            count=configDict['count'],
+            initial_state='Allocated'
+        )
+
+        return nodes
 
     def __post_add_spot_fleet_instance_request(
             self,

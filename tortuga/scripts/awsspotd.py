@@ -48,13 +48,12 @@ REDIS_CLIENT = redis.StrictRedis(
     db=0
 )
 
-EC2_CLIENT = boto3.client('ec2')
-
 
 def refresh_spot_instance_request_cache():
-    cfg = json.loads(REDIS_CLIENT.get('spot-config'))
-    if isinstance(cfg, dict):
-        return cfg
+    response = REDIS_CLIENT.get('spot-config')
+    if response:
+        return json.loads(response)
+
     return {}
 
 
@@ -77,60 +76,75 @@ def update_spot_instance_request_cache(sir_id, metadata=None):
 def spot_listener(logger):
     logger.info('Starting spot listener thread')
 
-    pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-d')
+    pubsub = REDIS_CLIENT.pubsub()
+    pubsub.subscribe('tortuga-aws-spot-d')
 
     while True:
         request = pubsub.get_message()
 
-        if 'action' not in request['data']:
-            pubsub.publish(json.dumps({'error': 'malformed request'}))
-            continue
+        if request and request['type'] == 'message' and request['data']:
+            try:
+                data = json.loads(request['data'])
+            except:
+                continue
 
-        with SPOT_CACHE:
-            cfg = refresh_spot_instance_request_cache()
+            if 'action' not in data:
+                REDIS_CLIENT.publish(
+                    'tortuga-aws-spot-d',
+                    json.dumps({'error': 'malformed request'})
+                )
+                continue
 
-            if request['data']['spot_instance_request_id'] not in cfg:
-                cfg[request['data']['spot_instance_request_id']] = {}
+            with SPOT_CACHE:
+                cfg = refresh_spot_instance_request_cache()
 
-                logger.info(
-                    'Updating spot instance [{0}]'.format(
-                        request['data']['spot_instance_request_id']))
+                if data['spot_instance_request_id'] not in cfg:
+                    cfg[data['spot_instance_request_id']] = {}
 
-                if 'softwareprofile' in request['data']:
-                    cfg[request['data']['spot_instance_request_id']]['softwareprofile'] = \
-                        request['data']['softwareprofile']
+                    logger.info(
+                        'Updating spot instance [{0}]'.format(
+                            data['spot_instance_request_id']))
 
-                if 'hardwareprofile' in request['data']:
-                    cfg[request['data']['spot_instance_request_id']]['hardwareprofile'] = \
-                        request['data']['hardwareprofile']
+                    if 'softwareprofile' in data:
+                        cfg[data['spot_instance_request_id']]['softwareprofile'] = \
+                            data['softwareprofile']
 
-                if 'resource_adapter_configuration' in request['data']:
-                    cfg[request['data']['spot_instance_request_id']]['resource_adapter_configuration'] = \
-                        request['data']['resource_adapter_configuration']
+                    if 'hardwareprofile' in data:
+                        cfg[data['spot_instance_request_id']]['hardwareprofile'] = \
+                            data['hardwareprofile']
 
-                write_spot_instance_request_cache(cfg)
+                    if 'resource_adapter_configuration' in data:
+                        cfg[data['spot_instance_request_id']]['resource_adapter_configuration'] = \
+                            data['resource_adapter_configuration']
 
-        # Send reply back to client
-        pubsub.publish(b'success')
+                    write_spot_instance_request_cache(cfg)
+
+                # Send reply back to client
+                REDIS_CLIENT.publish(
+                    'tortuga-aws-spot-d',
+                    'success'
+                )
+
+        gevent.sleep(5)
 
 
-def poll_for_spot_instances(request):
+def poll_for_spot_instances(request, ec2_client):
     enqueued = []
-    pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-d')
 
     while True:
         if request['target'] == len(enqueued):
             break
 
-        response = EC2_CLIENT.describe_spot_fleet_instances(
+        response = ec2_client.describe_spot_fleet_instances(
             SpotFleetRequestId=request['spot_fleet_request_id']
         )
 
         if response['ActiveInstances']:
             for instance in response['ActiveInstances']:
                 if instance['SpotInstanceRequestId'] not in enqueued:
-                    pubsub.publish(json.dumps(
-                        {
+                    REDIS_CLIENT.publish(
+                        'tortuga-aws-spot-d',
+                        json.dumps({
                             'action': 'add',
                             'spot_instance_request_id': instance['SpotInstanceRequestId'],
                             'softwareprofile': request['softwareprofile'],
@@ -141,22 +155,31 @@ def poll_for_spot_instances(request):
                     enqueued.append(instance['SpotInstanceRequestId'])
 
 
-def spot_fleet_listener(logger):
+def spot_fleet_listener(logger, ec2_client):
     logger.info('Starting spot fleet listener thread')
 
-    pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-fleet-d')
+    pubsub = REDIS_CLIENT.pubsub()
+    pubsub.subscribe('tortuga-aws-spot-fleet-d')
 
     greenlets = []
 
     while True:
         request = pubsub.get_message()
 
-        if 'spot_fleet_request_id' in request['data']:
-            greenlet = gevent.spawn(
-                poll_for_spot_instances,
-                request['data']
-            )
-            greenlets.append(greenlet)
+        if request and request['type'] == 'message' and request['data']:
+            try:
+                data = json.loads(request['data'])
+            except:
+                continue
+
+
+            if 'spot_fleet_request_id' in data:
+                greenlet = gevent.spawn(
+                    poll_for_spot_instances,
+                    data,
+                    ec2_client
+                )
+                greenlets.append(greenlet)
 
     gevent.joinall(greenlets)
 
@@ -199,8 +222,10 @@ class AWSSpotdAppClass(object):
         spot_listener_thread.daemon = True
         spot_listener_thread.start()
 
+        ec2_client = boto3.client('ec2', region_name=self.options.region)
+
         spot_fleet_thread = threading.Thread(
-            target=spot_fleet_listener, args=(self.logger, )
+            target=spot_fleet_listener, args=(self.logger, ec2_client)
         )
         spot_fleet_thread.daemon = True
         spot_fleet_thread.start()
@@ -280,7 +305,7 @@ class AWSSpotdAppClass(object):
                 spot_instance_request['resource_adapter_configuration'] = \
                     cfg[sir_id]['resource_adapter_configuration']
 
-        spot_instance_requests.append(spot_instance_request)
+            spot_instance_requests.append(spot_instance_request)
 
         return spot_instance_requests
 
