@@ -27,8 +27,8 @@ class RequestSpotInstancesCLI(TortugaCli):
         self.addOption('--software-profile', metavar='NAME')
         self.addOption('--hardware-profile', metavar='NAME')
         self.addOption('--count', '-n', dest='count', metavar='COUNT',
-                       type='int', default=1)
-        self.addOption('--price', type='float')
+                       type=int, default=1)
+        self.addOption('--price', type=float)
         self.addOption('--resource-adapter-configuration', '-A')
 
         super(RequestSpotInstancesCLI, self).parseArgs(usage=usage)
@@ -36,8 +36,8 @@ class RequestSpotInstancesCLI(TortugaCli):
     def runCommand(self):
         self.parseArgs()
 
-        if not self.getOptions().software_profile or \
-                not self.getOptions().hardware_profile:
+        if not self.getArgs().software_profile or \
+                not self.getArgs().hardware_profile:
             print('Instances fulfilled from spot requests without associated'
                   ' hardware and/or software profile will *not* join the'
                   ' cluster. Do you wish to proceed [N/y]? '),
@@ -48,29 +48,29 @@ class RequestSpotInstancesCLI(TortugaCli):
 
         addNodesRequest = dict()
 
-        if self.getOptions().resource_adapter_configuration:
+        if self.getArgs().resource_adapter_configuration:
             addNodesRequest['resource_adapter_configuration'] = \
-                self.getOptions().resource_adapter_configuration
+                self.getArgs().resource_adapter_configuration
 
-        if self.getOptions().software_profile:
+        if self.getArgs().software_profile:
             addNodesRequest['softwareProfile'] = \
-                self.getOptions().software_profile
+                self.getArgs().software_profile
 
-        if self.getOptions().hardware_profile:
+        if self.getArgs().hardware_profile:
             addNodesRequest['hardwareProfile'] = \
-                self.getOptions().hardware_profile
+                self.getArgs().hardware_profile
 
-        addNodesRequest['count'] = self.getOptions().count
+        addNodesRequest['count'] = self.getArgs().count
 
         spot_instance_request = dict(type='one-time')
 
-        spot_instance_request['price'] = self.getOptions().price
+        spot_instance_request['price'] = self.getArgs().price
 
         print('Requesting {0} node(s) in software profile [{1}],'
               ' hardware profile [{2}]'.format(
-                  self.getOptions().count,
-                  self.getOptions().software_profile,
-                  self.getOptions().hardware_profile))
+                  self.getArgs().count,
+                  self.getArgs().software_profile,
+                  self.getArgs().hardware_profile))
 
         addNodesRequest['spot_instance_request'] = spot_instance_request
 
