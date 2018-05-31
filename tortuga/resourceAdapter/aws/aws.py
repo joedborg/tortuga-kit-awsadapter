@@ -31,6 +31,7 @@ import gevent.queue
 import zmq
 from sqlalchemy.orm.session import Session
 
+import boto3
 import boto
 import boto.ec2
 import boto.vpc
@@ -713,6 +714,16 @@ class Aws(ResourceAdapter):
 
             return nodes
 
+        if 'spot_fleet_request' in addNodesRequest:
+            nodes = self.request_spot_fleet_instances(
+                addNodesRequest,
+                dbSession,
+                dbHardwareProfile,
+                dbSoftwareProfile
+            )
+
+            return nodes
+
         cfgname = addNodesRequest['resource_adapter_configuration'] \
             if 'resource_adapter_configuration' in addNodesRequest else \
             None
@@ -1034,26 +1045,43 @@ class Aws(ResourceAdapter):
 
         :returns: None
         """
-        client = boto3.client('ec2')
-        response = client.request_spot_fleet(
+        cfgname = addNodesRequest['resource_adapter_configuration'] \
+            if 'resource_adapter_configuration' in addNodesRequest else \
+            None
+
+        configDict = self.getResourceAdapterConfig(cfgname)
+
+        conn = boto3.client('ec2')
+        response = conn.request_spot_fleet(
             DryRun=False,
             SpotFleetRequestConfig={
                 'SpotPrice': addNodesRequest['spot_instance_request']['price'],
                 'IamFleetRole': addNodesRequest['spot_instance_request']['role'],
-                'TargetCapacity': addNodesRequest['count'],
+                'TargetCapacity': configDict['count'],
                 'LaunchSpecifications': [{
-                    'ImageId': 'ami-951201f1',
-                    'InstanceType': 'm4.xlarge',
-                    'WeightedCapacity': 1,
+                    'ImageId': configDict['ami'],
+                    'InstanceType': configDict['instancetype'],
+                    'WeightedCapacity': configDict['weighted_capacity'],
                     'Placement': {
-                        'AvailabilityZone': 'eu-west-2a, eu-west-2b'
+                        'AvailabilityZone': configDict['region']
                     }
                 }]
             }
         )
 
+        self.__post_add_spot_fleet_instance_request(
+            response['SpotFleetRequestId'],
+            configDict['count'],
+            dbHardwareProfile,
+            dbSoftwareProfile,
+            cfgname
+        )
+
     def __post_add_spot_fleet_instance_request(
-            self, resv, dbHardwareProfile: HardwareProfile,
+            self,
+            sfr_id: str,
+            target: int,
+            dbHardwareProfile: HardwareProfile,
             dbSoftwareProfile: SoftwareProfile,
             cfgname: Optional[str] = None) -> NoReturn:
         """
@@ -1061,12 +1089,22 @@ class Aws(ResourceAdapter):
 
         :returns: None
         """
-        self.__post_add_spot_instance_request(
-            resv,
-            dbHardwareProfile,
-            dbSoftwareProfile,
-            cfgname
-        )
+        pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-fleet-d')
+
+        request = {
+            'action': 'add',
+            'spot_fleet_request_id': sfr_id,
+            'target': target,
+            'softwareprofile': dbSoftwareProfile.name,
+            'hardwareprofile': dbHardwareProfile.name,
+        }
+
+        if cfgname:
+            request['resource_adapter_configuration'] = \
+                cfgname
+
+        pubsub.publish(json.dumps(request))
+
 
     def validate_start_arguments(self, addNodesRequest: dict,
                                  dbHardwareProfile: HardwareProfile,

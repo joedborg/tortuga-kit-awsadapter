@@ -23,6 +23,7 @@ import time
 import redis
 import boto
 import boto.ec2
+import boto3
 import gevent
 import gevent.queue
 
@@ -46,6 +47,8 @@ REDIS_CLIENT = redis.StrictRedis(
     port=6379,
     db=0
 )
+
+EC2_CLIENT = boto3.client('ec2')
 
 
 def refresh_spot_instance_request_cache():
@@ -71,8 +74,8 @@ def update_spot_instance_request_cache(sir_id, metadata=None):
     write_spot_instance_request_cache(cfg)
 
 
-def listener(logger):
-    logger.info('Starting listener thread')
+def spot_listener(logger):
+    logger.info('Starting spot listener thread')
 
     pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-d')
 
@@ -111,6 +114,53 @@ def listener(logger):
         pubsub.publish(b'success')
 
 
+def poll_for_spot_instances(request):
+    enqueued = []
+    pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-d')
+
+    while True:
+        if request['target'] == len(enqueued):
+            break
+
+        response = EC2_CLIENT.describe_spot_fleet_instances(
+            SpotFleetRequestId=request['spot_fleet_request_id']
+        )
+
+        if response['ActiveInstances']:
+            for instance in response['ActiveInstances']:
+                if instance['SpotInstanceRequestId'] not in enqueued:
+                    pubsub.publish(json.dumps(
+                        {
+                            'action': 'add',
+                            'spot_instance_request_id': instance['SpotInstanceRequestId'],
+                            'softwareprofile': request['softwareprofile'],
+                            'hardwareprofile': request['hardwareprofile']
+                        }
+                    ))
+
+                    enqueued.append(instance['SpotInstanceRequestId'])
+
+
+def spot_fleet_listener(logger):
+    logger.info('Starting spot fleet listener thread')
+
+    pubsub = REDIS_CLIENT.subscribe('tortuga-aws-spot-fleet-d')
+
+    greenlets = []
+
+    while True:
+        request = pubsub.get_message()
+
+        if 'spot_fleet_request_id' in request['data']:
+            greenlet = gevent.spawn(
+                poll_for_spot_instances,
+                request['data']
+            )
+            greenlets.append(greenlet)
+
+    gevent.joinall(greenlets)
+
+
 class AWSSpotdAppClass(object):
     def __init__(self, options, args):
         self.options = options
@@ -143,10 +193,17 @@ class AWSSpotdAppClass(object):
             'Starting... EC2 region [{0}]'.format(self.options.region))
 
         # Create thread for message queue requests from resource adapter
-        listener_thread = threading.Thread(
-            target=listener, args=(self.logger,))
-        listener_thread.daemon = True
-        listener_thread.start()
+        spot_listener_thread = threading.Thread(
+            target=spot_listener, args=(self.logger,)
+        )
+        spot_listener_thread.daemon = True
+        spot_listener_thread.start()
+
+        spot_fleet_thread = threading.Thread(
+            target=spot_fleet_listener, args=(self.logger, )
+        )
+        spot_fleet_thread.daemon = True
+        spot_fleet_thread.start()
 
         queue = gevent.queue.JoinableQueue()
 
