@@ -1055,8 +1055,8 @@ class Aws(ResourceAdapter):
         response = conn.request_spot_fleet(
             DryRun=False,
             SpotFleetRequestConfig={
-                'SpotPrice': addNodesRequest['spot_instance_request']['price'],
-                'IamFleetRole': addNodesRequest['spot_instance_request']['role'],
+                'SpotPrice': addNodesRequest['spot_fleet_request']['price'],
+                'IamFleetRole': addNodesRequest['spot_fleet_request']['role'],
                 'TargetCapacity': configDict['count'],
                 'LaunchSpecifications': [{
                     'ImageId': configDict['ami'],
@@ -1104,7 +1104,6 @@ class Aws(ResourceAdapter):
                 cfgname
 
         pubsub.publish(json.dumps(request))
-
 
     def validate_start_arguments(self, addNodesRequest: dict,
                                  dbHardwareProfile: HardwareProfile,
