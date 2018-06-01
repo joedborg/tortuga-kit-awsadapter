@@ -1073,7 +1073,7 @@ class Aws(ResourceAdapter):
                     'WeightedCapacity': 1,
                     'KeyName': configDict['keypair'],
                     'SecurityGroups': [{
-                        'GroupName': securitygroup_id
+                        'GroupId': securitygroup_id
                     }]
                 }]
             }
