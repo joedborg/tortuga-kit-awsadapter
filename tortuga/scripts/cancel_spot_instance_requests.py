@@ -54,7 +54,7 @@ class CancelSpotInstanceRequestsCLI(TortugaCli):
 
         super(CancelSpotInstanceRequestsCLI, self).parseArgs(usage=usage)
 
-        if not self.getOptions().all and not self.getArgs():
+        if not self.getArgs().all and not self.getArgs():
             self.getParser().error(
                 '<spot instance request id> or --all argument must be'
                 ' specified')
@@ -70,7 +70,7 @@ class CancelSpotInstanceRequestsCLI(TortugaCli):
         cfg = configparser.ConfigParser()
         cfg.read(sir_instance_cache_filename)
 
-        if self.getOptions().all:
+        if self.getArgs().all:
             result = self.__get_spot_instance_request_ids(cfg)
         else:
             sir_id = self.getArgs()[0]
@@ -144,10 +144,14 @@ class CancelSpotInstanceRequestsCLI(TortugaCli):
     def __cancel_spot_instances(self, result):
         sir_map = self.__get_spot_instance_request_map(result)
 
-        aws_instance_cache = REDIS_CLIENT.get('tortuga-aws-instance')
+        try:
+            aws_instance_cache = json.loads(
+                REDIS_CLIENT.get('tortuga-aws-instance'))
+        except TypeError:
+            aws_instance_cache = {}
 
         # Iterate on map cancelling requests in each region
-        for region_name, sir_ids in sir_map.iteritems():
+        for region_name, sir_ids in sir_map.items():
             session = boto3.session.Session(region_name=region_name)
 
             ec2_conn = session.client('ec2')
@@ -171,7 +175,7 @@ class CancelSpotInstanceRequestsCLI(TortugaCli):
                 # terminated to avoid leaving orphaned Tortuga node records
                 cancelled_spot_instance_requests.append(
                     (sir['SpotInstanceRequestId'],
-                     self.getOptions().terminate or sir['State'] == 'open'))
+                     self.getArgs().terminate or sir['State'] == 'open'))
 
             result = ec2_conn.cancel_spot_instance_requests(
                 SpotInstanceRequestIds=sir_ids)

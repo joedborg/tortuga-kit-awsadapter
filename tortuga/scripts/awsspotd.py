@@ -125,8 +125,6 @@ def spot_listener(logger):
                     'success'
                 )
 
-        gevent.sleep(5)
-
 
 def poll_for_spot_instances(request, ec2_client):
     enqueued = []
@@ -154,14 +152,14 @@ def poll_for_spot_instances(request, ec2_client):
 
                     enqueued.append(instance['SpotInstanceRequestId'])
 
+        gevent.sleep(5)
+
 
 def spot_fleet_listener(logger, ec2_client):
     logger.info('Starting spot fleet listener thread')
 
     pubsub = REDIS_CLIENT.pubsub()
     pubsub.subscribe('tortuga-aws-spot-fleet-d')
-
-    greenlets = []
 
     while True:
         request = pubsub.get_message()
@@ -172,16 +170,11 @@ def spot_fleet_listener(logger, ec2_client):
             except:
                 continue
 
-
             if 'spot_fleet_request_id' in data:
-                greenlet = gevent.spawn(
-                    poll_for_spot_instances,
+                poll_for_spot_instances(
                     data,
                     ec2_client
                 )
-                greenlets.append(greenlet)
-
-    gevent.joinall(greenlets)
 
 
 class AWSSpotdAppClass(object):
@@ -465,7 +458,10 @@ class AWSSpotdAppClass(object):
             return
 
         # Determine node from spot instance request id
-        nodes = json.loads(REDIS_CLIENT.get('tortuga-aws-instance'))
+        try:
+            nodes = json.loads(REDIS_CLIENT.get('tortuga-aws-instance'))
+        except TypeError:
+            nodes = {}
 
         create_node = False
 
@@ -473,8 +469,9 @@ class AWSSpotdAppClass(object):
             if nodes[node_name].get('spot_instance_request', None) and \
                     nodes[node_name]['spot_instance_request'] == sir_id:
                 break
-            else:
-                create_node = True
+
+        else:
+            create_node = True
 
             node_name = instance.private_dns_name \
                 if hwp.getNameFormat() == '*' else None
@@ -527,9 +524,15 @@ class AWSSpotdAppClass(object):
                     'Timeout waiting for add nodes operation'
                     ' to complete')
             except NodeAlreadyExists:
+                nodes.pop(node_name)
+                REDIS_CLIENT.set(
+                    'tortuga-aws-instance',
+                    json.dumps(nodes)
+                )
                 self.logger.error(
                     'Error adding node [{0}]:'
-                    ' already exists'.format(instance.private_dns_name))
+                    ' already exists'.format(instance.private_dns_name)
+                )
         else:
             self.logger.info(
                 'Updating existing node [{0}]'.format(

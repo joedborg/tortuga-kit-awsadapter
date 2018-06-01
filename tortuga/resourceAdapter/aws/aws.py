@@ -1067,7 +1067,8 @@ class Aws(ResourceAdapter):
                 'LaunchSpecifications': [{
                     'ImageId': configDict['ami'],
                     'InstanceType': configDict['instancetype'],
-                    'WeightedCapacity': 1
+                    'WeightedCapacity': 1,
+                    'KeyName': configDict['keypair']
                 }]
             }
         )
