@@ -1080,14 +1080,16 @@ class Aws(ResourceAdapter):
             cfgname
         )
 
-        nodes = self.__create_nodes(
-            dbHardwareProfile,
-            dbSoftwareProfile,
-            count=addNodesRequest['count'],
-            initial_state='Allocated'
-        )
+        if configDict['use_instance_hostname']:
+            return []
 
-        return nodes
+        else:
+            return self.__create_nodes(
+                dbHardwareProfile,
+                dbSoftwareProfile,
+                count=addNodesRequest['count'],
+                initial_state='Allocated'
+            )
 
     def __post_add_spot_fleet_instance_request(
             self,
