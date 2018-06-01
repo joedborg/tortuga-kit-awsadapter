@@ -1049,7 +1049,6 @@ class Aws(ResourceAdapter):
 
         :returns: None
         """
-
         cfgname = addNodesRequest['resource_adapter_configuration'] \
             if 'resource_adapter_configuration' in addNodesRequest else \
             None
@@ -1057,6 +1056,10 @@ class Aws(ResourceAdapter):
         configDict = self.getResourceAdapterConfig(cfgname)
 
         conn = boto3.client('ec2', region_name=configDict['region'].name)
+
+        securitygroup_id = conn.describe_security_groups(
+            GroupNames=configDict['securitygroup'])['SecurityGroups'][0]['GroupId']
+
         response = conn.request_spot_fleet(
             DryRun=False,
             SpotFleetRequestConfig={
@@ -1068,7 +1071,10 @@ class Aws(ResourceAdapter):
                     'ImageId': configDict['ami'],
                     'InstanceType': configDict['instancetype'],
                     'WeightedCapacity': 1,
-                    'KeyName': configDict['keypair']
+                    'KeyName': configDict['keypair'],
+                    'SecurityGroups': [{
+                        'GroupName': securitygroup_id
+                    }]
                 }]
             }
         )
