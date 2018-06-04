@@ -513,6 +513,9 @@ class AWSSpotdAppClass(object):
                         response = AddHostWsApi()\
                             .getStatus(session=addHostSession, getNodes=True)
 
+                        if not response.get('nodes', None):
+                            continue
+
                         if not response['running']:
                             self.logger.debug('response: {0}'.format(response))
                             node_name = response['nodes'][0]['name']
