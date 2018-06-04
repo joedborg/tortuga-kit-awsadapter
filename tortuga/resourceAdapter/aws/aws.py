@@ -1055,7 +1055,12 @@ class Aws(ResourceAdapter):
 
         configDict = self.getResourceAdapterConfig(cfgname)
 
-        conn = boto3.client('ec2', region_name=configDict['region'].name)
+        conn = boto3.client(
+            'ec2',
+            aws_access_key_id=configDict['awsaccesskey'],
+            aws_secret_access_key=configDict['awssecretkey'],
+            region_name=configDict['region'].name
+        )
 
         securitygroup_id = conn.describe_security_groups(
             GroupNames=configDict['securitygroup'])['SecurityGroups'][0]['GroupId']
