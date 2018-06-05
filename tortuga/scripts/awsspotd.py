@@ -43,13 +43,17 @@ SPOT_INSTANCE_POLLING_INTERVAL = 60
 
 SPOT_CACHE = threading.RLock()
 
+FACTER_PATH = '/opt/puppetlabs/bin/facter'
 
 def get_redis_client():
     try:
         uri = check_output(
-            ['facter', 'redis_url']
+            [FACTER_PATH, 'redis_url']
         ).strip().decode()
     except:
+        uri = None
+
+    if not uri:
         uri = 'localhost:6379'
 
     host, port = uri.split(':')
@@ -635,7 +639,7 @@ def main():
         if not options_.region:
             az = check_output(
                 [
-                    'facter',
+                    FACTER_PATH,
                     '--no-external-facts',
                     'ec2_metadata.placement.availability-zone'
                 ]

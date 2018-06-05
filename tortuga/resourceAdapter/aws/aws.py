@@ -1070,13 +1070,13 @@ class Aws(ResourceAdapter):
            'TargetCapacity': addNodesRequest['count'],
            'LaunchSpecifications': [{
                'UserData': b64encode(
-                   self.__get_user_data(configDict).encode).decode(),
+                   self.__get_user_data(configDict).encode()).decode(),
                'ImageId': configDict['ami'],
                'InstanceType': configDict['instancetype'],
                'WeightedCapacity': 1,
                'KeyName': configDict['keypair'],
                'SecurityGroups': [{
-                   'GroupId': securitygroup_id
+                   'GroupId': configDict['securitygroup'][0]
                }]
            }]
         }
