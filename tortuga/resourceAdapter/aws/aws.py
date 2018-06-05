@@ -26,6 +26,7 @@ from base64 import b64encode
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, NoReturn, Optional, Tuple, Union
+from subprocess import check_output
 
 import gevent
 import gevent.queue
@@ -63,11 +64,27 @@ from .helpers import _get_encoded_list, ec2_get_root_block_devices
 from .launchRequest import LaunchRequest, init_node_request_queue
 
 
-REDIS_CLIENT = redis.StrictRedis(
-    host='localhost',
-    port=6379,
-    db=0
-)
+def get_redis_client():
+    try:
+        uri = check_output(
+            [FACTER_PATH, 'redis_url']
+        ).strip().decode()
+    except:
+        uri = None
+
+    if not uri:
+        uri = 'localhost:6379'
+
+    host, port = uri.split(':')
+
+    return redis.StrictRedis(
+        host=host,
+        port=port,
+        db=0
+    )
+
+
+REDIS_CLIENT = get_redis_client()
 
 
 class Aws(ResourceAdapter):
