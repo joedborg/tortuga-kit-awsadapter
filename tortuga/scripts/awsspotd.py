@@ -28,6 +28,7 @@ import gevent
 import gevent.queue
 
 from daemonize import Daemonize
+from subprocess import check_output
 from tortuga.exceptions.nodeAlreadyExists import NodeAlreadyExists
 from tortuga.exceptions.nodeNotFound import NodeNotFound
 from tortuga.hardwareprofile.hardwareProfileApi import HardwareProfileApi
@@ -42,11 +43,25 @@ SPOT_INSTANCE_POLLING_INTERVAL = 60
 
 SPOT_CACHE = threading.RLock()
 
-REDIS_CLIENT = redis.StrictRedis(
-    host='localhost',
-    port=6379,
-    db=0
-)
+
+def get_redis_client():
+    try:
+        uri = check_output(
+            ['facter', 'redis_url']
+        ).strip().decode()
+    except:
+        uri = 'localhost:6379'
+
+    host, port = uri.split(':')
+
+    return redis.StrictRedis(
+        host=host,
+        port=port,
+        db=0
+    )
+
+
+REDIS_CLIENT = get_redis_client()
 
 
 def refresh_spot_instance_request_cache():
@@ -589,7 +604,7 @@ def main():
     aws_group = optparse.OptionGroup(parser, 'AWS Options')
 
     aws_group.add_option(
-        '--region', default='us-east-1',
+        '--region', default=None,
         help='AWS region to manage Spot Instances in')
 
     parser.add_option_group(aws_group)
@@ -615,6 +630,21 @@ def main():
     parser.add_option_group(polling_group)
 
     options_, args_ = parser.parse_args()
+
+    try:
+        if not options_.region:
+            az = check_output(
+                [
+                    'facter',
+                    '--no-external-facts',
+                    'ec2_metadata.placement.availability-zone'
+                ]
+            ).strip().decode()
+
+            options_.region = az[:-1]
+
+    except:
+        options_.region = 'us-west-1'
 
     result_ = [region for region in boto.ec2.regions()
                if region.name == options_.region]

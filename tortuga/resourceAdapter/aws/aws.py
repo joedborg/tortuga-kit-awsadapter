@@ -22,6 +22,7 @@ import random
 import shlex
 import sys
 import xml.etree.cElementTree as ET
+from base64 import b64encode
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, NoReturn, Optional, Tuple, Union
@@ -1062,9 +1063,6 @@ class Aws(ResourceAdapter):
             region_name=configDict['region'].name
         )
 
-        securitygroup_id = conn.describe_security_groups(
-            GroupNames=configDict['securitygroup'])['SecurityGroups'][0]['GroupId']
-
         response = conn.request_spot_fleet(
             DryRun=False,
             SpotFleetRequestConfig={
@@ -1073,8 +1071,11 @@ class Aws(ResourceAdapter):
                 'IamFleetRole': configDict['fleet_role'],
                 'TargetCapacity': addNodesRequest['count'],
                 'LaunchSpecifications': [{
+                    'UserData': b64encode(
+                        self.__get_user_data(configDict).encode).decode(),
                     'ImageId': configDict['ami'],
                     'InstanceType': configDict['instancetype'],
+                    'SubnetId': configDict['subnet_id'],
                     'WeightedCapacity': 1,
                     'KeyName': configDict['keypair'],
                     'SecurityGroups': [{
