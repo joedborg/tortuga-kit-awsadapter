@@ -63,6 +63,7 @@ from .exceptions import AWSOperationTimeoutError
 from .helpers import _get_encoded_list, ec2_get_root_block_devices
 from .launchRequest import LaunchRequest, init_node_request_queue
 
+FACTER_PATH = '/opt/puppetlabs/bin/facter'
 
 def get_redis_client():
     try:
@@ -79,7 +80,7 @@ def get_redis_client():
 
     return redis.StrictRedis(
         host=host,
-        port=port,
+        port=int(port),
         db=0
     )
 
@@ -1099,9 +1100,7 @@ class Aws(ResourceAdapter):
         }
 
         if configDict.get('subnet_id', None):
-            request_config['LaunchSpecifications'].append(
-                {'SubnetId': configDict['subnet_id']}
-            )
+            request_config['LaunchSpecifications'][0]['SubnetId'] =  configDict['subnet_id']
 
         response = conn.request_spot_fleet(
             DryRun=False,

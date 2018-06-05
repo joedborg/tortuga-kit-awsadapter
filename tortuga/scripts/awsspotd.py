@@ -60,7 +60,7 @@ def get_redis_client():
 
     return redis.StrictRedis(
         host=host,
-        port=port,
+        port=int(port),
         db=0
     )
 
