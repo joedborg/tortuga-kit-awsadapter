@@ -1063,26 +1063,32 @@ class Aws(ResourceAdapter):
             region_name=configDict['region'].name
         )
 
+        request_config = {
+           'SpotPrice': '{:0.2f}'.format(
+               addNodesRequest['spot_fleet_request']['price']),
+           'IamFleetRole': configDict['fleet_role'],
+           'TargetCapacity': addNodesRequest['count'],
+           'LaunchSpecifications': [{
+               'UserData': b64encode(
+                   self.__get_user_data(configDict).encode).decode(),
+               'ImageId': configDict['ami'],
+               'InstanceType': configDict['instancetype'],
+               'WeightedCapacity': 1,
+               'KeyName': configDict['keypair'],
+               'SecurityGroups': [{
+                   'GroupId': securitygroup_id
+               }]
+           }]
+        }
+
+        if configDict.get('subnet_id', None):
+            request_config['LaunchSpecifications'].append(
+                {'SubnetId': configDict['subnet_id']}
+            )
+
         response = conn.request_spot_fleet(
             DryRun=False,
-            SpotFleetRequestConfig={
-                'SpotPrice': '{:0.2f}'.format(
-                    addNodesRequest['spot_fleet_request']['price']),
-                'IamFleetRole': configDict['fleet_role'],
-                'TargetCapacity': addNodesRequest['count'],
-                'LaunchSpecifications': [{
-                    'UserData': b64encode(
-                        self.__get_user_data(configDict).encode).decode(),
-                    'ImageId': configDict['ami'],
-                    'InstanceType': configDict['instancetype'],
-                    'SubnetId': configDict['subnet_id'],
-                    'WeightedCapacity': 1,
-                    'KeyName': configDict['keypair'],
-                    'SecurityGroups': [{
-                        'GroupId': securitygroup_id
-                    }]
-                }]
-            }
+            SpotFleetRequestConfig=request_config
         )
 
         self.__post_add_spot_fleet_instance_request(
