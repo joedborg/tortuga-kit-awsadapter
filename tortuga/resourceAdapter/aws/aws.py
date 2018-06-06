@@ -1062,7 +1062,7 @@ class Aws(ResourceAdapter):
         """TODO"""
 
     def request_spot_fleet_instances(self, addNodesRequest, dbSession,
-                                dbHardwareProfile, dbSoftwareProfile):
+                                     dbHardwareProfile, dbSoftwareProfile):
         """
         Request spot fleet instances.
 
@@ -1086,21 +1086,27 @@ class Aws(ResourceAdapter):
                addNodesRequest['spot_fleet_request']['price']),
            'IamFleetRole': configDict['fleet_role'],
            'TargetCapacity': addNodesRequest['count'],
-           'LaunchSpecifications': [{
-               'UserData': b64encode(
-                   self.__get_user_data(configDict).encode()).decode(),
-               'ImageId': configDict['ami'],
-               'InstanceType': configDict['instancetype'],
-               'WeightedCapacity': 1,
-               'KeyName': configDict['keypair'],
-               'SecurityGroups': [{
-                   'GroupId': configDict['securitygroup'][0]
-               }]
-           }]
+           'LaunchSpecifications': []
         }
 
+        for instance_type in configDict['instancetype'].split(','):
+            request_config['LaunchSpecifications'].append(
+                {
+                    'UserData': b64encode(
+                        self.__get_user_data(configDict).encode()).decode(),
+                    'ImageId': configDict['ami'],
+                    'InstanceType': instance_type.strip(),
+                    'WeightedCapacity': 1,
+                    'KeyName': configDict['keypair'],
+                    'SecurityGroups': [{
+                        'GroupId': configDict['securitygroup'][0]
+                    }]
+                }
+            )
+
         if configDict.get('subnet_id', None):
-            request_config['LaunchSpecifications'][0]['SubnetId'] =  configDict['subnet_id']
+            request_config['LaunchSpecifications'][0]['SubnetId'] = \
+                configDict['subnet_id']
 
         response = conn.request_spot_fleet(
             DryRun=False,
