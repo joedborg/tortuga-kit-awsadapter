@@ -23,9 +23,8 @@ import redis
 import boto
 import boto.ec2
 import boto3
-import gevent
-import gevent.queue
 
+from time import sleep
 from daemonize import Daemonize
 from subprocess import check_output
 from tortuga.exceptions.nodeAlreadyExists import NodeAlreadyExists
@@ -58,18 +57,6 @@ def get_redis_client():
 
 
 REDIS_CLIENT = get_redis_client()
-
-
-def refresh_spot_instance_request_cache():
-    response = REDIS_CLIENT.get('tortuga-aws-spot-requests')
-    if response:
-        return json.loads(response)
-
-    return {}
-
-
-def write_spot_instance_request_cache(cfg):
-    return REDIS_CLIENT.set('tortuga-aws-spot-requests', json.dumps(cfg))
 
 
 def spot_listener(logger, ec2):
@@ -143,6 +130,9 @@ def poll_for_spot_instances(logger, request, ec2_client):
             )
         )
         if request['target'] == len(enqueued):
+            logger.info(
+                'Finished queueing {} requests'.format(request['target'])
+            )
             break
 
         response = ec2_client.describe_spot_fleet_instances(
@@ -164,14 +154,44 @@ def poll_for_spot_instances(logger, request, ec2_client):
 
                     enqueued.append(instance['SpotInstanceRequestId'])
 
-        gevent.sleep(5)
+        sleep(5)
+
+
+def glide_to_target(spot_fleet_request_id, initial, target, logger,
+                    ec2_client):
+    current = initial
+    while current < target:
+        request = ec2_client.describe_spot_fleet_requests(
+            SpotFleetRequestIds=[spot_fleet_request_id]
+        )['SpotFleetRequestConfigs'][0]
+
+        if request['SpotFleetRequestState'] == 'active':
+            if (target - current) >= 250:
+                current += 250
+            else:
+                current += (target - current)
+
+            logger.debug(
+                'Increasing spot fleet request to {} of {}'.format(
+                    current,
+                    target
+                )
+            )
+
+            ec2_client.modify_spot_fleet_request(
+                SpotFleetRequestId=spot_fleet_request_id,
+                TargetCapacity=current
+            )
+
+        sleep(5)
 
 
 def poll_fulfilled_requests(logger):
+    logger.info('Starting fulfillment thread')
     while True:
         requests = REDIS_CLIENT.hgetall('tortuga-aws-spot-fulfill')
         if not requests:
-            gevent.sleep(5)
+            sleep(5)
             continue
         add_nodes_request = {
             'softwareProfile': REDIS_CLIENT.get(
@@ -216,7 +236,7 @@ def poll_fulfilled_requests(logger):
         except NodeAlreadyExists as e:
             logger.error(e)
 
-        gevent.sleep(5)
+        sleep(5)
 
 
 def spot_fleet_listener(logger, ec2_client):
@@ -249,6 +269,20 @@ def spot_fleet_listener(logger, ec2_client):
             )
 
             if 'spot_fleet_request_id' in data:
+                if data['target'] > 250:
+                    glide_thread = threading.Thread(
+                        target=glide_to_target,
+                        args=(
+                            data['spot_fleet_request_id'],
+                            250,
+                            data['target'],
+                            logger,
+                            ec2_client
+                        ),
+                        daemon=True
+                    )
+                    glide_thread.start()
+
                 poll_for_spot_instances(
                     logger,
                     data,

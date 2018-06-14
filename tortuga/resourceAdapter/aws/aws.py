@@ -824,31 +824,6 @@ class Aws(ResourceAdapter):
                 launch_request.softwareprofile.name,
                 ip)
 
-            if 'metadata' in nodedetail and \
-                    'ec2_instance_id' in nodedetail['metadata']:
-                instance = self.__get_instance_by_instance_id(
-                    launch_request.conn,
-                    nodedetail['metadata']['ec2_instance_id'])
-
-                if not instance:
-                    self.getLogger().warning(
-                        'Error inserting node [{0}]. AWS instance [{1}]'
-                        ' does not exist'.format(
-                            fqdn, nodedetail['metadata']['ec2_instance_id']))
-
-                    continue
-
-                self.getLogger().debug(
-                    '__insert_nodes(): add node [{0}]'
-                    ' instance: [{1}]'.format(
-                        fqdn,
-                        nodedetail['metadata']['ec2_instance_id']))
-            else:
-                instance = None
-
-                self.getLogger().debug(
-                    '__insert_nodes(): add node [{0}]'.format(fqdn))
-
             node = Node(name=fqdn)
             node.softwareprofile = launch_request.softwareprofile
             node.hardwareprofile = launch_request.hardwareprofile
@@ -859,22 +834,6 @@ class Aws(ResourceAdapter):
             node.nics = [Nic(ip=ip, boot=True)]
 
             nodes.append(node)
-
-            if instance:
-                # Update instance cache
-                self.instanceCacheSet(
-                    node.name,
-                    launch_request.addNodesRequest,
-                    instance_id=nodedetail['metadata']['ec2_instance_id'])
-
-                # Add tags
-                self.getLogger().debug(
-                    'Assigning tags to instance [{0}]'.format(
-                        instance.id))
-
-                self.__assign_tags(
-                    launch_request.configDict, launch_request.conn, node,
-                    instance)
 
         return nodes
 
@@ -1082,31 +1041,42 @@ class Aws(ResourceAdapter):
         )
 
         request_config = {
-           'SpotPrice': '{:0.2f}'.format(
-               addNodesRequest['spot_fleet_request']['price']),
            'IamFleetRole': configDict['fleet_role'],
            'TargetCapacity': addNodesRequest['count'],
            'LaunchSpecifications': []
         }
 
-        for instance_type in configDict['instancetype'].split(','):
-            request_config['LaunchSpecifications'].append(
-                {
+        if addNodesRequest['count'] <= 250:
+            request_config['TargetCapacity'] = addNodesRequest['count']
+        else:
+            request_config['TargetCapacity'] = 250  # Glide to target.
+
+        if addNodesRequest['spot_fleet_request']['price']:
+            request_config['SpotPrice'] = '{:0.2f}'.format(
+               addNodesRequest['spot_fleet_request']['price'])
+
+
+        for instance in configDict['instancetype'].split(','):
+            try:
+                instance_type, weight = instance.split(':')
+            except ValueError:
+                instance_type = instance
+                weight = 1
+            for subnet_id in configDict['subnet_id'].split(','):
+                spec = {
                     'UserData': b64encode(
                         self.__get_user_data(configDict).encode()).decode(),
                     'ImageId': configDict['ami'],
+                    'SubnetId': subnet_id,
                     'InstanceType': instance_type.strip(),
-                    'WeightedCapacity': 1,
+                    'WeightedCapacity': int(weight),
                     'KeyName': configDict['keypair'],
                     'SecurityGroups': [{
                         'GroupId': configDict['securitygroup'][0]
                     }]
                 }
-            )
 
-        if configDict.get('subnet_id', None):
-            request_config['LaunchSpecifications'][0]['SubnetId'] = \
-                configDict['subnet_id']
+            request_config['LaunchSpecifications'].append(spec)
 
         response = conn.request_spot_fleet(
             DryRun=False,

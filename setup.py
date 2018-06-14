@@ -41,6 +41,7 @@ setup(
     entry_points={
         'console_scripts': [
             'awsspotd=tortuga.scripts.awsspotd:main',
+            'fleetspotd=tortuga.scripts.fleetspotd:main',
             'cancel-spot-instance-requests=tortuga.scripts.cancel_spot_instance_requests:main',
             'get-current-spot-instance-price=tortuga.scripts.get_current_spot_instanc_price:main',
             'list-spot-instance-nodes=tortuga.scripts.list_spot_instance_nodes:main',

@@ -69,7 +69,7 @@ REDIS_CLIENT = get_redis_client()
 
 
 def refresh_spot_instance_request_cache():
-    response = REDIS_CLIENT.get('spot-config')
+    response = REDIS_CLIENT.get('tortuga-aws-spot-requests')
     if response:
         return json.loads(response)
 
@@ -77,7 +77,7 @@ def refresh_spot_instance_request_cache():
 
 
 def write_spot_instance_request_cache(cfg):
-    return REDIS_CLIENT.set('spot-config', json.dumps(cfg))
+    return REDIS_CLIENT.set('tortuga-aws-spot-requests', json.dumps(cfg))
 
 
 def update_spot_instance_request_cache(sir_id, metadata=None):
@@ -174,6 +174,70 @@ def poll_for_spot_instances(request, ec2_client):
         gevent.sleep(5)
 
 
+def poll_fulfilled_requests(logger):
+    while True:
+        requests = REDIS_CLIENT.hgetall('tortuga-aws-spot-fulfill')
+        if not requests:
+            gevent.sleep(5)
+            continue
+        add_nodes_request = {
+            'softwareProfile': REDIS_CLIENT.get(
+                'tortuga-aws-spot-software-profile').decode(),
+            'hardwareProfile': REDIS_CLIENT.get(
+                'tortuga-aws-spot-hardware-profile').decode(),
+            'isIdle': False,
+            'count': len(requests.keys()),
+            'nodeDetails': [],
+        }
+
+        resource_adapter_configuration = REDIS_CLIENT.get(
+            'tortuga-aws-spot-resource-adapter-configuration'
+        )
+
+        if resource_adapter_configuration:
+            add_nodes_request['resource_adapter_configuration'] = \
+                json.loads(resource_adapter_configuration)
+
+        for sir_id, instance in requests.items():
+            instance = json.loads(instance)
+            add_nodes_request['nodeDetails'].append({
+                'name': instance['name'],
+                'metadata': {
+                    'ec2_instance_id': instance['id'],
+                    'ec2_ipaddress': instance['private_ip_address'],
+                }
+            })
+            REDIS_CLIENT.hdel(
+                'tortuga-aws-spot-fulfill',
+                sir_id
+            )
+        try:
+            addHostSession = AddHostWsApi().addNodes(add_nodes_request)
+
+            with gevent.Timeout(300):
+                while True:
+                    response = AddHostWsApi().getStatus(
+                        session=addHostSession, getNodes=True)
+
+                    if not response.get('nodes', None):
+                        gevent.sleep(0.1)
+                        continue
+
+                    if not response['running']:
+                        logger.debug('response: {0}'.format(response))
+                        break
+
+                    gevent.sleep(5)
+        except gevent.timeout.Timeout:
+            logger.error(
+                'Timeout waiting for add nodes operation'
+                ' to complete')
+        except NodeAlreadyExists as e:
+            logger.error(e)
+
+        gevent.sleep(5)
+
+
 def spot_fleet_listener(logger, ec2_client):
     logger.info('Starting spot fleet listener thread')
 
@@ -242,6 +306,12 @@ class AWSSpotdAppClass(object):
         spot_fleet_thread.daemon = True
         spot_fleet_thread.start()
 
+        fulfilled_thread = threading.Thread(
+            target=poll_fulfilled_requests, args=(self.logger,)
+        )
+        fulfilled_thread.daemon = True
+        fulfilled_thread.start()
+
         queue = gevent.queue.JoinableQueue()
 
         while True:
@@ -295,6 +365,7 @@ class AWSSpotdAppClass(object):
             self.logger.info('Sleeping for %ds' % (
                 self.options.polling_interval))
 
+            write_spot_instance_request_cache({})
             time.sleep(self.options.polling_interval)
 
     def __parse_spot_instance_request_cache(self, cfg):
@@ -321,8 +392,7 @@ class AWSSpotdAppClass(object):
 
         return spot_instance_requests
 
-    def worker(self, thread_id, queue): \
-            # pylint: disable=unused-argument
+    def worker(self, thread_id, queue):
         while True:
             try:
                 spot_instance_request = queue.get()
@@ -477,10 +547,7 @@ class AWSSpotdAppClass(object):
             return
 
         # Determine node from spot instance request id
-        try:
-            nodes = json.loads(REDIS_CLIENT.get('tortuga-aws-instance'))
-        except TypeError:
-            nodes = {}
+        nodes = {}
 
         create_node = False
 
@@ -500,61 +567,38 @@ class AWSSpotdAppClass(object):
                 'Creating node for spot instance'
                 ' [{0}]'.format(instance.id))
 
-            # Error: unable to find pre-allocated node record for spot
-            # instance request
-            addNodesRequest = {
-                'softwareProfile':
-                    spot_instance_request['softwareprofile'],
-                'hardwareProfile':
-                    spot_instance_request['hardwareprofile'],
-                'isIdle': False,
-                'count': 1,
-                'nodeDetails': [{
-                    'metadata': {
-                        'ec2_instance_id': instance.id,
-                        'ec2_ipaddress': instance.private_ip_address,
-                    }
-                }],
-            }
+            REDIS_CLIENT.set(
+                'tortuga-aws-spot-software-profile',
+                spot_instance_request['softwareprofile']
+            )
+
+            REDIS_CLIENT.set(
+                'tortuga-aws-spot-hardware-profile',
+                spot_instance_request['hardwareprofile']
+            )
 
             if 'resource_adapter_configuration' in spot_instance_request:
-                addNodesRequest['resource_adapter_configuration'] = \
-                    spot_instance_request['resource_adapter_configuration']
+                REDIS_CLIENT.set(
+                    'tortuga-aws-spot-resource-adapter-configuration',
+                    json.dumps(
+                        spot_instance_request['resource_adapter_configuration']
+                    )
+                )
+
+            request = {
+                'id': instance.id,
+                'private_ip_address': instance.private_ip_address
+            }
 
             if node_name:
-                addNodesRequest['nodeDetails'][0]['name'] = node_name
+                request['name'] = node_name
 
-            try:
-                addHostSession = AddHostWsApi().addNodes(addNodesRequest)
+            REDIS_CLIENT.hset(
+                'tortuga-aws-spot-fulfill',
+                sir_id,
+                json.dumps(request)
+            )
 
-                with gevent.Timeout(300):
-                    while True:
-                        response = AddHostWsApi()\
-                            .getStatus(session=addHostSession, getNodes=True)
-
-                        if not response.get('nodes', None):
-                            continue
-
-                        if not response['running']:
-                            self.logger.debug('response: {0}'.format(response))
-                            node_name = response['nodes'][0]['name']
-                            break
-
-                        gevent.sleep(5)
-            except gevent.timeout.Timeout:
-                self.logger.error(
-                    'Timeout waiting for add nodes operation'
-                    ' to complete')
-            except NodeAlreadyExists:
-                nodes.pop(node_name)
-                REDIS_CLIENT.set(
-                    'tortuga-aws-instance',
-                    json.dumps(nodes)
-                )
-                self.logger.error(
-                    'Error adding node [{0}]:'
-                    ' already exists'.format(instance.private_dns_name)
-                )
         else:
             self.logger.info(
                 'Updating existing node [{0}]'.format(

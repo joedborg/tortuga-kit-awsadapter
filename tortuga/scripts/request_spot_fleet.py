@@ -28,7 +28,7 @@ class RequestSpotFleetCLI(TortugaCli):
         self.addOption('--hardware-profile', metavar='NAME')
         self.addOption('--count', '-n', dest='count', metavar='COUNT',
                        type=int, default=1)
-        self.addOption('--price', type=float)
+        self.addOption('--price', type=float, default=0)
         self.addOption('--resource-adapter-configuration', '-A')
 
         super(RequestSpotFleetCLI, self).parseArgs(usage=usage)
