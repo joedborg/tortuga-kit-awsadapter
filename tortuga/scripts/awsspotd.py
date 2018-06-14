@@ -19,31 +19,22 @@ import logging
 import optparse
 import sys
 import threading
-import time
 import redis
 import boto
 import boto.ec2
 import boto3
-import gevent
-import gevent.queue
 
+from time import sleep
 from daemonize import Daemonize
 from subprocess import check_output
 from tortuga.exceptions.nodeAlreadyExists import NodeAlreadyExists
-from tortuga.exceptions.nodeNotFound import NodeNotFound
-from tortuga.hardwareprofile.hardwareProfileApi import HardwareProfileApi
-from tortuga.node.nodeApi import NodeApi
 from tortuga.wsapi.addHostWsApi import AddHostWsApi
 
 
-PIDFILE = '/var/log/awsspotd.pid'
-
-# Poll for spot instance status every 60s
-SPOT_INSTANCE_POLLING_INTERVAL = 60
-
-SPOT_CACHE = threading.RLock()
+PIDFILE = '/var/log/fleetspotd.pid'
 
 FACTER_PATH = '/opt/puppetlabs/bin/facter'
+
 
 def get_redis_client():
     try:
@@ -68,31 +59,7 @@ def get_redis_client():
 REDIS_CLIENT = get_redis_client()
 
 
-def refresh_spot_instance_request_cache():
-    response = REDIS_CLIENT.get('tortuga-aws-spot-requests')
-    if response:
-        return json.loads(response)
-
-    return {}
-
-
-def write_spot_instance_request_cache(cfg):
-    return REDIS_CLIENT.set('tortuga-aws-spot-requests', json.dumps(cfg))
-
-
-def update_spot_instance_request_cache(sir_id, metadata=None):
-    if not metadata:
-        return
-
-    cfg = refresh_spot_instance_request_cache()
-
-    if sir_id not in cfg:
-        cfg[sir_id] = metadata
-
-    write_spot_instance_request_cache(cfg)
-
-
-def spot_listener(logger):
+def spot_listener(logger, ec2):
     logger.info('Starting spot listener thread')
 
     pubsub = REDIS_CLIENT.pubsub()
@@ -104,52 +71,68 @@ def spot_listener(logger):
         if request and request['type'] == 'message' and request['data']:
             try:
                 data = json.loads(request['data'])
-            except:
+            except Exception:
                 continue
 
             if 'action' not in data:
-                REDIS_CLIENT.publish(
-                    'tortuga-aws-spot-d',
-                    json.dumps({'error': 'malformed request'})
-                )
                 continue
 
-            with SPOT_CACHE:
-                cfg = refresh_spot_instance_request_cache()
+            try:
+                result = ec2.get_all_spot_instance_requests(
+                    request_ids=data['spot_instance_request_id']
+                )
+            except boto.exception.EC2ResponseError as exc:
+                if exc.status == 400 and \
+                        exc.error_code == \
+                        u'InvalidSpotInstanceRequestID.NotFound':
+                    logger.warning(
+                        '{} is an invald SIR'.format(
+                            data['spot_instance_request_id']
+                        )
+                    )
+                    continue
 
-                if data['spot_instance_request_id'] not in cfg:
-                    cfg[data['spot_instance_request_id']] = {}
+            result = result[0]
 
-                    logger.info(
-                        'Updating spot instance [{0}]'.format(
-                            data['spot_instance_request_id']))
+            if result.state == 'active' and \
+                    result.status.code == 'fulfilled':
 
-                    if 'softwareprofile' in data:
-                        cfg[data['spot_instance_request_id']]['softwareprofile'] = \
-                            data['softwareprofile']
+                instances = ec2.get_all_instances(
+                    instance_ids=[result.instance_id]
+                )
+                instance = instances[0].instances[0]
 
-                    if 'hardwareprofile' in data:
-                        cfg[data['spot_instance_request_id']]['hardwareprofile'] = \
-                            data['hardwareprofile']
+                logger.debug(
+                    'Queuing add of {}'.format(
+                        instance.private_dns_name
+                    )
+                )
 
-                    if 'resource_adapter_configuration' in data:
-                        cfg[data['spot_instance_request_id']]['resource_adapter_configuration'] = \
-                            data['resource_adapter_configuration']
-
-                    write_spot_instance_request_cache(cfg)
-
-                # Send reply back to client
-                REDIS_CLIENT.publish(
-                    'tortuga-aws-spot-d',
-                    'success'
+                REDIS_CLIENT.hset(
+                    'tortuga-aws-spot-fulfill',
+                    data['spot_instance_request_id'],
+                    json.dumps({
+                        'name': instance.private_dns_name,
+                        'id': instance.id,
+                        'private_ip_address': instance.private_ip_address
+                    })
                 )
 
 
-def poll_for_spot_instances(request, ec2_client):
+def poll_for_spot_instances(logger, request, ec2_client):
     enqueued = []
 
     while True:
+        logger.debug(
+            'SIR queue {} of {}'.format(
+                len(enqueued),
+                request['target']
+            )
+        )
         if request['target'] == len(enqueued):
+            logger.info(
+                'Finished queueing {} requests'.format(request['target'])
+            )
             break
 
         response = ec2_client.describe_spot_fleet_instances(
@@ -166,19 +149,49 @@ def poll_for_spot_instances(request, ec2_client):
                             'spot_instance_request_id': instance['SpotInstanceRequestId'],
                             'softwareprofile': request['softwareprofile'],
                             'hardwareprofile': request['hardwareprofile']
-                        }
-                    ))
+                        })
+                    )
 
                     enqueued.append(instance['SpotInstanceRequestId'])
 
-        gevent.sleep(5)
+        sleep(5)
+
+
+def glide_to_target(spot_fleet_request_id, initial, target, logger,
+                    ec2_client):
+    current = initial
+    while current < target:
+        request = ec2_client.describe_spot_fleet_requests(
+            SpotFleetRequestIds=[spot_fleet_request_id]
+        )['SpotFleetRequestConfigs'][0]
+
+        if request['SpotFleetRequestState'] == 'active':
+            if (target - current) >= 250:
+                current += 250
+            else:
+                current += (target - current)
+
+            logger.debug(
+                'Increasing spot fleet request to {} of {}'.format(
+                    current,
+                    target
+                )
+            )
+
+            ec2_client.modify_spot_fleet_request(
+                SpotFleetRequestId=spot_fleet_request_id,
+                TargetCapacity=current
+            )
+
+        sleep(5)
 
 
 def poll_fulfilled_requests(logger):
+    logger.info('Starting fulfillment thread')
     while True:
         requests = REDIS_CLIENT.hgetall('tortuga-aws-spot-fulfill')
         if not requests:
-            gevent.sleep(5)
+            sleep(5)
             continue
         add_nodes_request = {
             'softwareProfile': REDIS_CLIENT.get(
@@ -211,31 +224,19 @@ def poll_fulfilled_requests(logger):
                 'tortuga-aws-spot-fulfill',
                 sir_id
             )
+
+        logger.debug(
+            'Adding {} nodes to Tortuga'.format(
+                len(add_nodes_request['nodeDetails'])
+            )
+        )
+
         try:
-            addHostSession = AddHostWsApi().addNodes(add_nodes_request)
-
-            with gevent.Timeout(300):
-                while True:
-                    response = AddHostWsApi().getStatus(
-                        session=addHostSession, getNodes=True)
-
-                    if not response.get('nodes', None):
-                        gevent.sleep(0.1)
-                        continue
-
-                    if not response['running']:
-                        logger.debug('response: {0}'.format(response))
-                        break
-
-                    gevent.sleep(5)
-        except gevent.timeout.Timeout:
-            logger.error(
-                'Timeout waiting for add nodes operation'
-                ' to complete')
+            AddHostWsApi().addNodes(add_nodes_request)
         except NodeAlreadyExists as e:
             logger.error(e)
 
-        gevent.sleep(5)
+        sleep(5)
 
 
 def spot_fleet_listener(logger, ec2_client):
@@ -250,17 +251,46 @@ def spot_fleet_listener(logger, ec2_client):
         if request and request['type'] == 'message' and request['data']:
             try:
                 data = json.loads(request['data'])
-            except:
+            except Exception:
                 continue
 
+            logger.debug('Got fleet request {}'.format(
+                data['spot_fleet_request_id']
+            ))
+
+            REDIS_CLIENT.set(
+                'tortuga-aws-spot-software-profile',
+                data['softwareprofile']
+            )
+
+            REDIS_CLIENT.set(
+                'tortuga-aws-spot-hardware-profile',
+                data['hardwareprofile']
+            )
+
             if 'spot_fleet_request_id' in data:
+                if data['target'] > 250:
+                    glide_thread = threading.Thread(
+                        target=glide_to_target,
+                        args=(
+                            data['spot_fleet_request_id'],
+                            250,
+                            data['target'],
+                            logger,
+                            ec2_client
+                        ),
+                        daemon=True
+                    )
+                    glide_thread.start()
+
                 poll_for_spot_instances(
+                    logger,
                     data,
                     ec2_client
                 )
 
 
-class AWSSpotdAppClass(object):
+class FleetSpotdAppClass(object):
     def __init__(self, options, args):
         self.options = options
         self.args = args
@@ -269,13 +299,16 @@ class AWSSpotdAppClass(object):
 
     def run(self):
         # Ensure logger is instantiated _after_ process is daemonized
-        self.logger = logging.getLogger('tortuga.aws.awsspotd')
+        self.logger = logging.getLogger('tortuga.aws.fleetspotd')
 
         self.logger.setLevel(logging.DEBUG)
 
         # create console handler and set level to debug
         ch = logging.handlers.TimedRotatingFileHandler(
-            '/var/log/tortuga_awsspotd', when='midnight')
+            '/var/log/tortuga_fleetspotd',
+            when='midnight'
+        )
+
         ch.setLevel(logging.DEBUG)
 
         # create formatter
@@ -289,361 +322,41 @@ class AWSSpotdAppClass(object):
         self.logger.addHandler(ch)
 
         self.logger.info(
-            'Starting... EC2 region [{0}]'.format(self.options.region))
-
-        # Create thread for message queue requests from resource adapter
-        spot_listener_thread = threading.Thread(
-            target=spot_listener, args=(self.logger,)
+            'Starting... EC2 region [{0}]'.format(
+                self.options.region
+            )
         )
-        spot_listener_thread.daemon = True
-        spot_listener_thread.start()
 
-        ec2_client = boto3.client('ec2', region_name=self.options.region)
+        boto_client = boto.ec2.connect_to_region(self.options.region)
+        boto3_client = boto3.client('ec2', region_name=self.options.region)
+
+        threads = []
+
+        spot_listener_thread = threading.Thread(
+            target=spot_listener,
+            args=(self.logger, boto_client),
+            daemon=True
+        )
+        spot_listener_thread.start()
+        threads.append(spot_listener_thread)
 
         spot_fleet_thread = threading.Thread(
-            target=spot_fleet_listener, args=(self.logger, ec2_client)
+            target=spot_fleet_listener,
+            args=(self.logger, boto3_client),
+            daemon=True
         )
-        spot_fleet_thread.daemon = True
         spot_fleet_thread.start()
+        threads.append(spot_fleet_thread)
 
         fulfilled_thread = threading.Thread(
-            target=poll_fulfilled_requests, args=(self.logger,)
+            target=poll_fulfilled_requests,
+            args=(self.logger,),
+            daemon=True
         )
-        fulfilled_thread.daemon = True
         fulfilled_thread.start()
+        threads.append(fulfilled_thread)
 
-        queue = gevent.queue.JoinableQueue()
-
-        while True:
-            cfg = refresh_spot_instance_request_cache()
-
-            # Spawn coroutines to process spot instance requests
-            num_workers = 20
-
-            for thread_id in range(num_workers):
-                gevent.spawn(self.worker, thread_id, queue)
-
-            spot_instance_requests = \
-                self.__parse_spot_instance_request_cache(cfg)
-            if spot_instance_requests:
-                # Enqueue spot instance requests for processing
-                for spot_instance_request in spot_instance_requests:
-                    queue.put(spot_instance_request)
-
-                # Process spot instance requests
-                queue.join()
-
-                # Clean up
-                self.logger.info('Cleaning up...')
-
-                with SPOT_CACHE:
-                    cfg = refresh_spot_instance_request_cache()
-
-                    for spot_instance_request in spot_instance_requests:
-                        if 'status' not in spot_instance_request:
-                            continue
-
-                        sir_status = spot_instance_request['status']
-
-                        if sir_status not in \
-                                ('invalid', 'notfound', 'cancelled',
-                                 'terminated'):
-                            continue
-
-                        # Delete spot instance request cache entry
-                        self.logger.info(
-                            'Removing spot instance request [{0}]'.format(
-                                spot_instance_request['sir_id']))
-
-                        cfg.pop(spot_instance_request['sir_id'], None)
-
-                    # Rewrite spot instance request cache
-                    write_spot_instance_request_cache(cfg)
-            else:
-                self.logger.info('No spot instance requests to process')
-
-            self.logger.info('Sleeping for %ds' % (
-                self.options.polling_interval))
-
-            write_spot_instance_request_cache({})
-            time.sleep(self.options.polling_interval)
-
-    def __parse_spot_instance_request_cache(self, cfg):
-        spot_instance_requests = []
-
-        for sir_id in cfg.keys():
-            spot_instance_request = {
-                'sir_id': sir_id,
-            }
-
-            if 'softwareprofile' in cfg[sir_id]:
-                spot_instance_request['softwareprofile'] = \
-                    cfg[sir_id]['softwareprofile']
-
-            if 'hardwareprofile' in cfg[sir_id]:
-                spot_instance_request['hardwareprofile'] = \
-                    cfg[sir_id]['hardwareprofile']
-
-            if 'resource_adapter_configuration' in cfg[sir_id]:
-                spot_instance_request['resource_adapter_configuration'] = \
-                    cfg[sir_id]['resource_adapter_configuration']
-
-            spot_instance_requests.append(spot_instance_request)
-
-        return spot_instance_requests
-
-    def worker(self, thread_id, queue):
-        while True:
-            try:
-                spot_instance_request = queue.get()
-
-                self.process_spot_instance_request(spot_instance_request)
-            except Exception:
-                self.logger.exception(
-                    'Exception while processing spot instance request')
-            finally:
-                queue.task_done()
-
-    def process_spot_instance_request(self, spot_instance_request):
-        """
-        Raises:
-            EC2ResponseError
-        """
-
-        hwp = HardwareProfileApi().getHardwareProfile(
-            spot_instance_request['hardwareprofile'])
-
-        ec2_conn = boto.ec2.connect_to_region(self.options.region)
-
-        sir_id = spot_instance_request['sir_id']
-
-        try:
-            result = ec2_conn.get_all_spot_instance_requests(
-                request_ids=[sir_id])
-        except boto.exception.EC2ResponseError as exc:
-            if exc.status == 400 and \
-                    exc.error_code == u'InvalidSpotInstanceRequestID.NotFound':
-                spot_instance_request['status'] = 'notfound'
-
-            raise
-
-        self.logger.info(
-            'sir: [{0}], state: [{1}],'
-            ' status code: [{2}]'.format(
-                sir_id, result[0].state, result[0].status.code))
-
-        if result[0].state == 'active':
-            if result[0].status.code == 'fulfilled':
-                cfg = refresh_spot_instance_request_cache()
-
-                if cfg.get(sir_id, None) and \
-                        cfg[sir_id].get('status', None) and \
-                        cfg[sir_id]['status'] == 'fulfilled':
-                    return  # Already processed.
-
-                self.__fulfilled_request_handler(
-                    ec2_conn, sir_id, result[0].instance_id,
-                    spot_instance_request, hwp)
-        elif result[0].state == 'open':
-            if result[0].status.code == 'pending-fulfillment':
-                self.logger.info('{0}'.format(result))
-            elif result[0].status.code == 'price-too-low':
-                #  request price-too-low
-                pass
-            elif result[0].status.code == 'instance-terminated-by-price':
-                # TODO: persistent spot instance request terminated due to
-                # price increase; queue delete node request
-                self.delete_node(sir_id)
-
-                spot_instance_request['status'] = 'terminated'
-            elif result[0].status.code == 'instance-terminated-no-capacity':
-                self.delete_node(sir_id)
-
-                spot_instance_request['status'] = 'terminated'
-            elif result[0].status.code == \
-                    'instance-terminated-capacity-oversubscribed':
-                self.delete_node(sir_id)
-
-                spot_instance_request['status'] = 'terminated'
-            elif result[0].status.code == \
-                    'instance-terminated-launch-group-constraint':
-                self.delete_node(sir_id)
-
-                spot_instance_request['status'] = 'terminated'
-        elif result[0].state == 'closed':
-            if result[0].status.code == 'marked-for-termination':
-                # TODO: any hinting for Tortuga here?
-                self.logger.info(
-                    'Instance {0} marked for termination'.format(
-                        result[0].instance_id))
-            elif result[0].status.code == 'instance-terminated-by-user':
-                # TODO: instance was terminated by user, but the spot request
-                # was not cancelled
-
-                self.delete_node(sir_id)
-
-                spot_instance_request['status'] = 'terminated'
-            elif result[0].status.code == 'instance-terminated-by-price':
-                # TODO: one-time spot instance request price increased;
-                # queue delete node request
-                self.delete_node(sir_id)
-
-                # Mark spot instance request for deletion
-                spot_instance_request['status'] = 'terminated'
-            elif result[0].status.code == 'instance-terminated-no-capacity':
-                self.delete_node(sir_id)
-
-                spot_instance_request['status'] = 'terminated'
-            elif result[0].status.code == \
-                    'instance-terminated-capacity-oversubscribed':
-                self.delete_node(sir_id)
-
-                spot_instance_request['status'] = 'terminated'
-            elif result[0].status.code == \
-                    'instance-terminated-launch-group-constraint':
-                self.delete_node(sir_id)
-
-                spot_instance_request['status'] = 'terminated'
-            elif result[0].status.code == 'system-error':
-                # TODO: nothing else can be done here; abort...
-                pass
-        elif result[0].state == 'cancelled':
-            if result[0].status.code == 'canceled-before-fulfillment':
-                # TODO: request was cancelled by end-user; nothing to do here
-
-                spot_instance_request['status'] = 'cancelled'
-            elif result[0].status.code == \
-                    'request-canceled-and-instance-running':
-                # Instance was left running after cancelling spot reqest;
-                # nothing to do...
-                pass
-            elif result[0].status.code == 'instance-terminated-by-user':
-                # TODO: queue delete node request
-
-                self.delete_node(sir_id)
-
-                spot_instance_request['status'] = 'terminated'
-            elif result[0].status.code == \
-                    'instance-terminated-capacity-oversubscribed':
-                self.delete_node(sir_id)
-
-                spot_instance_request['status'] = 'terminated'
-        elif result[0].state == 'failed':
-            # TODO: this request is dead in the water; nothing more can happen
-            pass
-
-    def __fulfilled_request_handler(self, ec2_conn, sir_id, instance_id,
-                                    spot_instance_request, hwp):
-        # Ensure node entries created
-        resvs = ec2_conn.get_all_instances(instance_ids=[instance_id])
-
-        instance = resvs[0].instances[0]
-
-        if instance.state not in ('pending', 'running'):
-            self.logger.info(
-                'Ignoring instance [{0}] in state [{1}]'.format(
-                    instance.id, instance.state))
-
-            return
-
-        # Determine node from spot instance request id
-        nodes = {}
-
-        create_node = False
-
-        for node_name in nodes.keys():
-            if nodes[node_name].get('spot_instance_request', None) and \
-                    nodes[node_name]['spot_instance_request'] == sir_id:
-                break
-
-        else:
-            create_node = True
-
-            node_name = instance.private_dns_name \
-                if hwp.getNameFormat() == '*' else None
-
-        if create_node:
-            self.logger.info(
-                'Creating node for spot instance'
-                ' [{0}]'.format(instance.id))
-
-            REDIS_CLIENT.set(
-                'tortuga-aws-spot-software-profile',
-                spot_instance_request['softwareprofile']
-            )
-
-            REDIS_CLIENT.set(
-                'tortuga-aws-spot-hardware-profile',
-                spot_instance_request['hardwareprofile']
-            )
-
-            if 'resource_adapter_configuration' in spot_instance_request:
-                REDIS_CLIENT.set(
-                    'tortuga-aws-spot-resource-adapter-configuration',
-                    json.dumps(
-                        spot_instance_request['resource_adapter_configuration']
-                    )
-                )
-
-            request = {
-                'id': instance.id,
-                'private_ip_address': instance.private_ip_address
-            }
-
-            if node_name:
-                request['name'] = node_name
-
-            REDIS_CLIENT.hset(
-                'tortuga-aws-spot-fulfill',
-                sir_id,
-                json.dumps(request)
-            )
-
-        else:
-            self.logger.info(
-                'Updating existing node [{0}]'.format(
-                    node_name))
-
-            # Mark node as 'Provisioned' now that there's a backing instance
-            NodeApi().updateNode(node_name, updateNodeRequest={
-                'state': 'Provisioned',
-                'nics': [
-                    {
-                        'ip': instance.private_ip_address,
-                    }
-                ],
-                'metadata': {
-                    'ec2_instance_id': instance.id,
-                }
-            })
-
-        update_spot_instance_request_cache(
-            sir_id, metadata=dict(node=node_name, status='fulfilled'))
-
-    def delete_node(self, sir_id):
-        with SPOT_CACHE:
-            cfg = refresh_spot_instance_request_cache()
-
-            if not cfg.get(sir_id, None) or \
-                    not cfg[sir_id].get('node', None):
-                self.logger.warning(
-                    'Spot instance [{0}] does not have an'
-                    ' associated node'.format(sir_id))
-
-                return
-
-            spot_instance_node_mapping = cfg[sir_id].get('node', None)
-
-            if spot_instance_node_mapping:
-                self.logger.info(
-                    'Removing node [{0}] for spot instance'
-                    ' request [{1}]'.format(
-                        spot_instance_node_mapping, sir_id))
-
-            try:
-                NodeApi().deleteNode(spot_instance_node_mapping)
-            except NodeNotFound:
-                pass
+        [t.join() for t in threads]
 
 
 def main():
@@ -652,30 +365,33 @@ def main():
     aws_group = optparse.OptionGroup(parser, 'AWS Options')
 
     aws_group.add_option(
-        '--region', default=None,
-        help='AWS region to manage Spot Instances in')
+        '--region',
+        default=None,
+        help='AWS region to manage Spot Instances in'
+    )
 
     parser.add_option_group(aws_group)
 
-    parser.add_option('--verbose', action='store_true', default=False,
-                      help='Enable verbose logging')
+    parser.add_option(
+        '--verbose',
+        action='store_true',
+        default=False,
+        help='Enable verbose logging'
+    )
 
-    parser.add_option('--daemon', action='store_false',
-                      dest='foreground', default=True,
-                      help='Start awsspotd in the background')
+    parser.add_option(
+        '--daemon',
+        action='store_false',
+        dest='foreground',
+        default=True,
+        help='Start awsspotd in the background'
+    )
 
-    parser.add_option('--pidfile', default=PIDFILE,
-                      help='Location of PID file')
-
-    polling_group = optparse.OptionGroup(parser, 'Polling Options')
-
-    polling_group.add_option(
-        '--polling-interval', '-p', type='int',
-        default=SPOT_INSTANCE_POLLING_INTERVAL,
-        metavar='<value>',
-        help='Polling interval in seconds (default: %default)')
-
-    parser.add_option_group(polling_group)
+    parser.add_option(
+        '--pidfile',
+        default=PIDFILE,
+        help='Location of PID file'
+    )
 
     options_, args_ = parser.parse_args()
 
@@ -691,22 +407,26 @@ def main():
 
             options_.region = az[:-1]
 
-    except:
+    except Exception:
         options_.region = 'us-west-1'
 
     result_ = [region for region in boto.ec2.regions()
                if region.name == options_.region]
+
     if not result_:
         sys.stderr.write(
             'Error: Invalid EC2 region [{0}] specified\n'.format(
                 options_.region))
         sys.exit(1)
 
-    cls = AWSSpotdAppClass(options_, args_)
+    cls = FleetSpotdAppClass(options_, args_)
 
-    daemon = Daemonize(app='awsspotd', pid=options_.pidfile,
-                       action=cls.run,
-                       verbose=options_.verbose,
-                       foreground=options_.foreground)
+    daemon = Daemonize(
+        app='fleetspotd',
+        pid=options_.pidfile,
+        action=cls.run,
+        verbose=options_.verbose,
+        foreground=options_.foreground
+    )
 
     daemon.start()
