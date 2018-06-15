@@ -171,7 +171,7 @@ def poll_for_spot_instances(logger, request, ec2_client):
                     e, backoff))
             sleep(backoff)
             if backoff < BACKOFF['max']:
-                backoff **= 2
+                backoff *= 2
             if backoff > BACKOFF['max']:
                 backoff = BACKOFF['max']
         else:
@@ -195,7 +195,7 @@ def glide_to_target(spot_fleet_request_id, initial, target, logger,
                     e, backoff))
             sleep(backoff)
             if backoff < BACKOFF['max']:
-                backoff **= 2
+                backoff *= 2
             if backoff > BACKOFF['max']:
                 backoff = BACKOFF['max']
         else:
@@ -227,7 +227,7 @@ def glide_to_target(spot_fleet_request_id, initial, target, logger,
                             e, backoff))
                     sleep(backoff)
                     if backoff < BACKOFF['max']:
-                        backoff **= 2
+                        backoff *= 2
                     if backoff > BACKOFF['max']:
                         backoff = BACKOFF['max']
                 else:
