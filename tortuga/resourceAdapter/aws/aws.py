@@ -1055,7 +1055,6 @@ class Aws(ResourceAdapter):
             request_config['SpotPrice'] = '{:0.2f}'.format(
                addNodesRequest['spot_fleet_request']['price'])
 
-
         for instance in configDict['instancetype'].split(','):
             try:
                 instance_type, weight = instance.split(':')
@@ -1076,7 +1075,7 @@ class Aws(ResourceAdapter):
                     }]
                 }
 
-            request_config['LaunchSpecifications'].append(spec)
+                request_config['LaunchSpecifications'].append(spec)
 
         response = conn.request_spot_fleet(
             DryRun=False,

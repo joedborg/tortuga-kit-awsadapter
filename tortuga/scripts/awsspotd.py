@@ -35,6 +35,11 @@ PIDFILE = '/var/log/fleetspotd.pid'
 
 FACTER_PATH = '/opt/puppetlabs/bin/facter'
 
+BACKOFF = {
+    'seed': 5,
+    'max': 60
+}
+
 
 def get_redis_client():
     try:
@@ -66,7 +71,7 @@ def spot_listener(logger, ec2):
     pubsub.subscribe('tortuga-aws-spot-d')
 
     while True:
-        request = pubsub.get_message()
+        request = pubsub.get_message(timeout=1)
 
         if request and request['type'] == 'message' and request['data']:
             try:
@@ -121,6 +126,7 @@ def spot_listener(logger, ec2):
 
 def poll_for_spot_instances(logger, request, ec2_client):
     enqueued = []
+    backoff = BACKOFF['seed']
 
     while True:
         logger.debug(
@@ -135,24 +141,41 @@ def poll_for_spot_instances(logger, request, ec2_client):
             )
             break
 
-        response = ec2_client.describe_spot_fleet_instances(
-            SpotFleetRequestId=request['spot_fleet_request_id']
-        )
+        paginator = ec2_client.get_paginator('describe_spot_fleet_instances')
 
-        if response['ActiveInstances']:
-            for instance in response['ActiveInstances']:
-                if instance['SpotInstanceRequestId'] not in enqueued:
-                    REDIS_CLIENT.publish(
-                        'tortuga-aws-spot-d',
-                        json.dumps({
-                            'action': 'add',
-                            'spot_instance_request_id': instance['SpotInstanceRequestId'],
-                            'softwareprofile': request['softwareprofile'],
-                            'hardwareprofile': request['hardwareprofile']
-                        })
+        try:
+            page_iterator = paginator.paginate(
+                SpotFleetRequestId=request['spot_fleet_request_id']
+            )
+            for response in page_iterator:
+                if response['ActiveInstances']:
+                    logger.debug(
+                        'Found {} request ids'.format(len(response['ActiveInstances']))
                     )
+                    for instance in response['ActiveInstances']:
+                        if instance['SpotInstanceRequestId'] not in enqueued:
+                            REDIS_CLIENT.publish(
+                                'tortuga-aws-spot-d',
+                                json.dumps({
+                                    'action': 'add',
+                                    'spot_instance_request_id': instance['SpotInstanceRequestId'],
+                                    'softwareprofile': request['softwareprofile'],
+                                    'hardwareprofile': request['hardwareprofile']
+                                })
+                            )
 
-                    enqueued.append(instance['SpotInstanceRequestId'])
+                            enqueued.append(instance['SpotInstanceRequestId'])
+        except Exception as e:
+            logger.warning(
+                'AWS API error ({}), sleeping for {}'.format(
+                    e, backoff))
+            sleep(backoff)
+            if backoff < BACKOFF['max']:
+                backoff **= 2
+            if backoff > BACKOFF['max']:
+                backoff = BACKOFF['max']
+        else:
+            backoff = BACKOFF['seed']
 
         sleep(5)
 
@@ -160,10 +183,23 @@ def poll_for_spot_instances(logger, request, ec2_client):
 def glide_to_target(spot_fleet_request_id, initial, target, logger,
                     ec2_client):
     current = initial
+    backoff = BACKOFF['seed']
     while current < target:
-        request = ec2_client.describe_spot_fleet_requests(
-            SpotFleetRequestIds=[spot_fleet_request_id]
-        )['SpotFleetRequestConfigs'][0]
+        try:
+            request = ec2_client.describe_spot_fleet_requests(
+                SpotFleetRequestIds=[spot_fleet_request_id]
+            )['SpotFleetRequestConfigs'][0]
+        except Exception as e:
+            logger.warning(
+                'AWS API error ({}), sleeping for {}'.format(
+                    e, backoff))
+            sleep(backoff)
+            if backoff < BACKOFF['max']:
+                backoff **= 2
+            if backoff > BACKOFF['max']:
+                backoff = BACKOFF['max']
+        else:
+            backoff = BACKOFF['seed']
 
         if request['SpotFleetRequestState'] == 'active':
             if (target - current) >= 250:
@@ -178,10 +214,24 @@ def glide_to_target(spot_fleet_request_id, initial, target, logger,
                 )
             )
 
-            ec2_client.modify_spot_fleet_request(
-                SpotFleetRequestId=spot_fleet_request_id,
-                TargetCapacity=current
-            )
+            while True:
+                try:
+                    ec2_client.modify_spot_fleet_request(
+                        SpotFleetRequestId=spot_fleet_request_id,
+                        TargetCapacity=current
+                    )
+                    break
+                except Exception as e:
+                    logger.warning(
+                        'AWS API error ({}), sleeping for {}'.format(
+                            e, backoff))
+                    sleep(backoff)
+                    if backoff < BACKOFF['max']:
+                        backoff **= 2
+                    if backoff > BACKOFF['max']:
+                        backoff = BACKOFF['max']
+                else:
+                    backoff = BACKOFF['max']
 
         sleep(5)
 
@@ -246,7 +296,7 @@ def spot_fleet_listener(logger, ec2_client):
     pubsub.subscribe('tortuga-aws-spot-fleet-d')
 
     while True:
-        request = pubsub.get_message()
+        request = pubsub.get_message(timeout=1)
 
         if request and request['type'] == 'message' and request['data']:
             try:
