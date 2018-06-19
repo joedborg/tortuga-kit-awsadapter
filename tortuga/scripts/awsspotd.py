@@ -70,6 +70,8 @@ def spot_listener(logger, ec2):
     pubsub = REDIS_CLIENT.pubsub()
     pubsub.subscribe('tortuga-aws-spot-d')
 
+    backoff = BACKOFF['seed']
+
     while True:
         request = pubsub.get_message(timeout=1)
 
@@ -82,29 +84,47 @@ def spot_listener(logger, ec2):
             if 'action' not in data:
                 continue
 
-            try:
-                result = ec2.get_all_spot_instance_requests(
-                    request_ids=data['spot_instance_request_id']
-                )
-            except boto.exception.EC2ResponseError as exc:
-                if exc.status == 400 and \
-                        exc.error_code == \
-                        u'InvalidSpotInstanceRequestID.NotFound':
-                    logger.warning(
-                        '{} is an invald SIR'.format(
-                            data['spot_instance_request_id']
-                        )
+            while True:
+                try:
+                    result = ec2.get_all_spot_instance_requests(
+                        request_ids=data['spot_instance_request_id']
                     )
-                    continue
+                    break
+                except Exception as e:
+                    logger.warning(
+                        'AWS API error ({}), sleeping for {}'.format(
+                            e, backoff))
+                    sleep(backoff)
+                    if backoff < BACKOFF['max']:
+                        backoff *= 2
+                    if backoff > BACKOFF['max']:
+                        backoff = BACKOFF['max']
+                else:
+                    backoff = BACKOFF['seed']
 
             result = result[0]
 
             if result.state == 'active' and \
                     result.status.code == 'fulfilled':
 
-                instances = ec2.get_all_instances(
-                    instance_ids=[result.instance_id]
-                )
+                while True:
+                    try:
+                        instances = ec2.get_all_instances(
+                            instance_ids=[result.instance_id]
+                        )
+                        break
+                    except Exception as e:
+                        logger.warning(
+                            'AWS API error ({}), sleeping for {}'.format(
+                                e, backoff))
+                        sleep(backoff)
+                        if backoff < BACKOFF['max']:
+                            backoff *= 2
+                        if backoff > BACKOFF['max']:
+                            backoff = BACKOFF['max']
+                    else:
+                        backoff = BACKOFF['seed']
+
                 instance = instances[0].instances[0]
 
                 logger.debug(

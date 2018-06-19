@@ -1082,6 +1082,9 @@ class Aws(ResourceAdapter):
             SpotFleetRequestConfig=request_config
         )
 
+        with open('/var/log/tortuga.{}'.format(response['SpotFleetRequestId']), 'w') as f:
+            f.write(json.dumps(request_config))
+
         self.__post_add_spot_fleet_instance_request(
             response['SpotFleetRequestId'],
             addNodesRequest['count'],
