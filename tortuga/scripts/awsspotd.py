@@ -89,7 +89,6 @@ def spot_listener(logger, ec2):
                     result = ec2.get_all_spot_instance_requests(
                         request_ids=data['spot_instance_request_id']
                     )
-                    break
                 except Exception as e:
                     logger.warning(
                         'AWS API error ({}), sleeping for {}'.format(
@@ -101,6 +100,7 @@ def spot_listener(logger, ec2):
                         backoff = BACKOFF['max']
                 else:
                     backoff = BACKOFF['seed']
+                    break
 
             result = result[0]
 
@@ -112,7 +112,6 @@ def spot_listener(logger, ec2):
                         instances = ec2.get_all_instances(
                             instance_ids=[result.instance_id]
                         )
-                        break
                     except Exception as e:
                         logger.warning(
                             'AWS API error ({}), sleeping for {}'.format(
@@ -124,6 +123,7 @@ def spot_listener(logger, ec2):
                             backoff = BACKOFF['max']
                     else:
                         backoff = BACKOFF['seed']
+                        break
 
                 instance = instances[0].instances[0]
 
@@ -240,7 +240,6 @@ def glide_to_target(spot_fleet_request_id, initial, target, logger,
                         SpotFleetRequestId=spot_fleet_request_id,
                         TargetCapacity=current
                     )
-                    break
                 except Exception as e:
                     logger.warning(
                         'AWS API error ({}), sleeping for {}'.format(
@@ -252,6 +251,7 @@ def glide_to_target(spot_fleet_request_id, initial, target, logger,
                         backoff = BACKOFF['max']
                 else:
                     backoff = BACKOFF['max']
+                    break
 
         sleep(5)
 
