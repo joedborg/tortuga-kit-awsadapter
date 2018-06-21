@@ -22,6 +22,7 @@ import random
 import shlex
 import sys
 import xml.etree.cElementTree as ET
+from time import time
 from base64 import b64encode
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -1061,28 +1062,28 @@ class Aws(ResourceAdapter):
             except ValueError:
                 instance_type = instance
                 weight = 1
-            for subnet_id in configDict['subnet_id'].split(','):
-                spec = {
-                    'UserData': b64encode(
-                        self.__get_user_data(configDict).encode()).decode(),
-                    'ImageId': configDict['ami'],
-                    'SubnetId': subnet_id,
-                    'InstanceType': instance_type.strip(),
-                    'WeightedCapacity': int(weight),
-                    'KeyName': configDict['keypair'],
-                    'SecurityGroups': [{
-                        'GroupId': configDict['securitygroup'][0]
-                    }]
-                }
+            spec = {
+                'UserData': b64encode(
+                    self.__get_user_data(configDict).encode()).decode(),
+                'ImageId': configDict['ami'],
+                'SubnetId': configDict['subnet_id'],
+                'InstanceType': instance_type.strip(),
+                'WeightedCapacity': float(weight),
+                'KeyName': configDict['keypair'],
+                'SecurityGroups': [{
+                    'GroupId': configDict['securitygroup'][0]
+                }]
+            }
 
-                request_config['LaunchSpecifications'].append(spec)
+            request_config['LaunchSpecifications'].append(spec)
 
         response = conn.request_spot_fleet(
             DryRun=False,
             SpotFleetRequestConfig=request_config
         )
 
-        with open('/var/log/tortuga.{}'.format(response['SpotFleetRequestId']), 'w') as f:
+        with open('/var/log/tortuga.{}.{}'.format(
+                response['SpotFleetRequestId'], int(time())), 'w') as f:
             f.write(json.dumps(request_config))
 
         self.__post_add_spot_fleet_instance_request(

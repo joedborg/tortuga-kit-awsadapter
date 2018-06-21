@@ -159,7 +159,7 @@ def poll_for_spot_instances(logger, request, ec2_client):
             logger.info(
                 'Finished queueing {} requests'.format(request['target'])
             )
-            break
+            # break  For 1m cores, we don't want to stop.
 
         paginator = ec2_client.get_paginator('describe_spot_fleet_instances')
 
