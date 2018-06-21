@@ -1042,9 +1042,10 @@ class Aws(ResourceAdapter):
         )
 
         request_config = {
-           'IamFleetRole': configDict['fleet_role'],
-           'TargetCapacity': addNodesRequest['count'],
-           'LaunchSpecifications': []
+            'IamFleetRole': configDict['fleet_role'],
+            'TargetCapacity': addNodesRequest['count'],
+            'AllocationStrategy': 'diversified',
+            'LaunchSpecifications': []
         }
 
         if addNodesRequest['count'] <= 250:
