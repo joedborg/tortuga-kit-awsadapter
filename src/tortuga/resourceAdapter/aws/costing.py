@@ -13,7 +13,7 @@
 # limitations under the License.
 import boto3
 from datetime import date
-from typing import Generator
+from typing import Generator, Optional
 from tortuga.resourceAdapter.costing import Costing
 
 
@@ -21,7 +21,7 @@ class AwsCosting(Costing):
     """
     Handle costing of AWS.
     """
-    def __init__(start: date, end: date) -> None:
+    def __init__(self, start: date, end: date) -> None:
         """
 
         :param start: Datetime start of report
@@ -40,32 +40,45 @@ class AwsCosting(Costing):
             'currency': string
         }
 
-        :todo:  This could be made async 
+        :todo:  This could be made async
         to process larger streams.
 
         :returns: Generator Dictionary
         """
         client = boto3.client('ce')
-        response: dict = client.get_cost_and_usage(
-            TimePeriod={
-                'Start': self.start.strftime('%Y-%m-%d'),
-                'End': self.end.strftime('%Y-%m-%d'),
-            },
-            Granularity='DAILY',
-            Metrics=['BlendedCost'],
-            Filter={
-                'Tags': {
-                    'Key': 'tortuga',
-                    'Values': [
-                        'cost'
-                    ],
-                }
-            }
-        )
+        page_token: Optional[str] = None
 
-        for day in response['ResultsByTime']:
-            yield {
-                'date': date.fromisoformat(day['TimePeriod']['Start']),
-                'cost': day['Total']['BlendedCost']['Amount'],
-                'currency': day['Total']['BlendedCost']['Unit'],
-            }
+        while True:
+            if page_token:
+                kwargs: dict = {'NextPageToken': page_token}
+            else:
+                kwargs: dict = {}
+
+            response: dict = client.get_cost_and_usage(
+                TimePeriod={
+                    'Start': self.start.strftime('%Y-%m-%d'),
+                    'End': self.end.strftime('%Y-%m-%d'),
+                },
+                Granularity='DAILY',
+                Metrics=['BlendedCost'],
+                Filter={
+                    'Tags': {
+                        'Key': 'tortuga',
+                        'Values': [
+                            'cost'
+                        ],
+                    }
+                },
+                **kwargs
+            )
+
+            for day in response['ResultsByTime']:
+                yield {
+                    'date': date.fromisoformat(day['TimePeriod']['Start']),
+                    'cost': day['Total']['BlendedCost']['Amount'],
+                    'currency': day['Total']['BlendedCost']['Unit'],
+                }
+
+            page_token = response.get('NextPageToken', None)
+            if not page_token:
+                break
