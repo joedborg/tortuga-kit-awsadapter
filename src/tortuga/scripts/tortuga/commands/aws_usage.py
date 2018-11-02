@@ -68,6 +68,7 @@ class LicenseUsageCommand(Command):
         """
         Iterate over each row and write to file.
 
+        :param args: Namespace
         :returns: None
         """
         self._args = args

@@ -15,6 +15,7 @@
 # limitations under the License.
 from tortuga.cli.base import RootCommand
 from .aws_usage import LicenseUsageCommand
+from .aws_spot_fleet import SpotFleetRootCommand
 
 
 class AWSCommand(RootCommand):
@@ -23,4 +24,5 @@ class AWSCommand(RootCommand):
 
     sub_commands = [
         LicenseUsageCommand(),
+        SpotFleetRootCommand()
     ]
