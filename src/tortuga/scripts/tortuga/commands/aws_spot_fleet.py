@@ -17,12 +17,88 @@ import boto3
 import argparse
 
 from tortuga.cli.base import Command, Argument
+from tortuga.wsapi.addHostWsApi import AddHostWsApi
 from ....resourceAdapter.aws.helpers import get_redis_client, get_region
 
 
 REDIS_CLIENT = get_redis_client()
 REDIS_KEY = 'tortuga-aws-splot-fleet-requests'
 BOTO = boto3.client('ec2', region_name=get_region())
+
+
+class NewSpotFleet(Command):
+    """
+    Add spot fleet request.
+    """
+    name = 'add'
+    help = 'Add spot fleet request'
+
+    arguments = [
+        Argument(
+            '--software-profile',
+            metavar='NAME',
+            required=True
+        ),
+        Argument(
+            '--hardware-profile',
+            metavar='NAME',
+            required=True
+        ),
+        Argument(
+            '-n',
+            '--count',
+            dest='count',
+            metavar='COUNT',
+            type=int,
+            default=1
+        ),
+        Argument(
+            '--price',
+            type=float,
+            default=0
+        ),
+        Argument(
+            '-A',
+            '--resource-adapter-configuration'
+        )
+    ]
+
+    def execute(self, args: argparse.Namespace):
+        """
+        Add a spot fleet request.
+
+        :param args: Namespace
+        :returns: None
+        """
+        add_nodes_request: dict = dict()
+
+        if args.resource_adapter_configuration:
+            add_nodes_request['resource_adapter_configuration'] = \
+                args.resource_adapter_configuration
+
+        if args.software_profile:
+            add_nodes_request['softwareProfile'] = \
+                args.software_profile
+
+        if args.hardware_profile:
+            add_nodes_request['hardwareProfile'] = \
+                args.hardware_profile
+
+        add_nodes_request['count'] = args.count
+
+        spot_fleet_request: dict = dict(type='one-time')
+
+        spot_fleet_request['price'] = args.price
+
+        print('Requesting {0} node(s) in software profile [{1}],'
+              ' hardware profile [{2}]'.format(
+                  args.count,
+                  args.software_profile,
+                  args.hardware_profile))
+
+        add_nodes_request['spot_fleet_request'] = spot_fleet_request
+
+        AddHostWsApi().addNodes(add_nodes_request)
 
 
 class ListSpotFleet(Command):
@@ -126,6 +202,7 @@ class SpotFleetRootCommand(Command):
     help = 'Spot fleet actions'
 
     sub_commands = [
+        NewSpotFleet(),
         ListSpotFleet(),
         DeleteSpotFleet(),
         SetSpotFleet()

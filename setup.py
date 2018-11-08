@@ -73,7 +73,6 @@ setup(
             'list-spot-instance-nodes=tortuga.scripts.list_spot_instance_nodes:main',
             'list-spot-instance-requests=tortuga.scripts.list_spot_instance_requests:main',
             'request-spot-instances=tortuga.scripts.request_spot_instances:main',
-            'request-spot-fleet=tortuga.scripts.request_spot_fleet:main',
             'setup-aws=tortuga.scripts.setup_aws:main',
         ]
     }
